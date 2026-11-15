@@ -29,7 +29,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"
+
+      - name: Expose Chaquopy build Python
+        run: echo "CHAQUOPY_BUILD_PYTHON=$pythonLocation/bin/python" >> "$GITHUB_ENV"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

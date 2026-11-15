@@ -15,6 +15,8 @@ android {
 }
 chaquopy {
     defaultConfig {
+        def ciBuildPython = System.getenv('CHAQUOPY_BUILD_PYTHON')
+        if (ciBuildPython) buildPython(ciBuildPython)
         pip { install 'deltachat-rpc-client==2.69.0'
             install 'cryptography' }
     }
