@@ -31,12 +31,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android build tools
-        run: sdkmanager "build-tools;34.0.0"
-
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -54,7 +48,10 @@ jobs:
           set -euo pipefail
           APK=app/build/outputs/apk/debug/app-debug.apk
           test -f "$APK"
-          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" | grep -F "package: name='com.vanipy.jin'"
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          AAPT=$(find "$SDK/build-tools" -type f -name aapt | sort -V | tail -1)
+          test -n "$AAPT"
+          "$AAPT" dump badging "$APK" | grep -F "package: name='com.vanipy.jin'"
 
       - name: Upload qualification APK
         uses: actions/upload-artifact@v4
