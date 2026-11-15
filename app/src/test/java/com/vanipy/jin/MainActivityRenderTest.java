@@ -1,4 +1,4 @@
-package com.instinct.bottest.scratch;
+package com.vanipy.jin;
 
 import static org.junit.Assert.assertTrue;
 

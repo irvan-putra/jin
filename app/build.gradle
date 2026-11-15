@@ -1,9 +1,9 @@
 plugins { id 'com.android.application'; id 'com.chaquo.python' }
 android {
-    namespace 'com.instinct.bottest.scratch'
+    namespace 'com.vanipy.jin'
     compileSdk 34
     defaultConfig {
-        applicationId 'com.instinct.bottest.scratch'
+        applicationId 'com.vanipy.jin'
         minSdk 26
         targetSdk 34
         versionCode 9

@@ -1,4 +1,4 @@
-package com.instinct.bottest.scratch;
+package com.vanipy.jin;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -43,7 +43,7 @@ public class BotService extends Service {
                 : "offline validation running";
         Notification.Builder nb = Build.VERSION.SDK_INT >= 26
                 ? new Notification.Builder(this, "bot") : new Notification.Builder(this);
-        Notification n = nb.setContentTitle("SCRATCH bot 0.3")
+        Notification n = nb.setContentTitle("Jin")
                 .setContentText(label)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .build();

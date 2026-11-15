@@ -6,7 +6,7 @@ validation builds as they were.
 
 ---
 
-# intodo bot validation (scratch 0.3, r12)
+# Jin - intodo bot validation (0.3, r12)
 
 scratch 0.3 keeps the 0.2 OFFLINE probe and adds a LIVE mode: the v6.1
 delivery bot running on-device as a foreground service with its own dedicated
