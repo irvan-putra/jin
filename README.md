@@ -1,3 +1,11 @@
+Note (15 Nov 2026): this repo contains the standalone validation builds used
+while developing the phone-side DeltaChat bot runtime. The runtime later moved
+into [intodo](https://github.com/irvan-putra/intodo) as itdapk's embedded bot -
+see intodo for the current source and releases. The text below describes these
+validation builds as they were.
+
+---
+
 # intodo bot validation (scratch 0.3, r12)
 
 scratch 0.3 keeps the 0.2 OFFLINE probe and adds a LIVE mode: the v6.1
