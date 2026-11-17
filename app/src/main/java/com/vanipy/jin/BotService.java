@@ -43,7 +43,7 @@ public class BotService extends Service {
                 : "offline validation running";
         Notification.Builder nb = Build.VERSION.SDK_INT >= 26
                 ? new Notification.Builder(this, "bot") : new Notification.Builder(this);
-        Notification n = nb.setContentTitle("Jin")
+        Notification n = nb.setContentTitle("jin")
                 .setContentText(label)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .build();
