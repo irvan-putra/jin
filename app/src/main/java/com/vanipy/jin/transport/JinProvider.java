@@ -172,8 +172,20 @@ public class JinProvider extends ContentProvider {
         return b;
     }
 
+    // Striped per-token locks: overlapping same-token binder commits
+    // serialize here, so the second observes the ledger entry the first
+    // wrote and returns the original ref instead of sending twice.
+    private final Object[] commitLocks = new Object[64];
+    { for (int i = 0; i < commitLocks.length; i++) commitLocks[i] = new Object(); }
+
     private Bundle commit(String pkg, String token, Bundle extras) {
         if (!validToken(token)) return err(TransportContract.E_BAD_TOKEN);
+        synchronized (commitLocks[(token.hashCode() & 0x7fffffff) % commitLocks.length]) {
+            return commitLocked(pkg, token, extras);
+        }
+    }
+
+    private Bundle commitLocked(String pkg, String token, Bundle extras) {
         String metaRaw = extras == null ? null : extras.getString(TransportContract.K_META);
         if (metaRaw == null) return err(TransportContract.E_MALFORMED);
         JSONObject meta;

@@ -201,6 +201,64 @@ public class TransportProviderTest {
     }
 
     /** Watches for one SYNC_REQ_* and answers it with the canned payload. */
+    @Test
+    public void concurrentSameTokenCommitSendsOnce() throws Exception {
+        grants.setEnabled(PKG, CERT_A, true, "/x");
+        String handle = "aGFuZGxl";
+        grants.setChatScope(PKG, handle, "send", true);
+        botAlive();
+        // answers EVERY bridge request it sees and counts them: an
+        // unserialized duplicate would answer twice
+        final java.util.concurrent.atomic.AtomicInteger answered =
+                new java.util.concurrent.atomic.AtomicInteger();
+        final java.io.File dir = RuntimeEnvironment.getApplication().getFilesDir();
+        final java.util.Set<String> seenReqs =
+                java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+        Thread responder = new Thread(() -> {
+            long deadline = System.currentTimeMillis() + 8000;
+            while (System.currentTimeMillis() < deadline && answered.get() == 0) {
+                String[] names = dir.list();
+                if (names != null) for (String n : names) {
+                    if (!n.startsWith("SYNC_REQ_") || !seenReqs.add(n)) continue;
+                    answered.incrementAndGet();
+                    new java.io.File(dir, n).delete();
+                    try {
+                        java.io.File tmp = new java.io.File(dir,
+                                "SYNC_RESP_tok_race.tmp");
+                        java.io.FileWriter w = new java.io.FileWriter(tmp);
+                        w.write("{\"ok\":true,\"ref\":\"m82\"}");
+                        w.close();
+                        tmp.renameTo(new java.io.File(dir, "SYNC_RESP_tok_race"));
+                    } catch (Exception ignored) {}
+                }
+                try { Thread.sleep(20); } catch (InterruptedException ie) { return; }
+            }
+        });
+        responder.setDaemon(true);
+        responder.start();
+        call(provider, TransportContract.M_STAGE, "tok_race", null);
+        final long ts = System.currentTimeMillis();
+        java.util.concurrent.Callable<Bundle> commit = () -> {
+            Bundle meta = new Bundle();
+            meta.putString(TransportContract.K_META,
+                    "{\"chat\":\"" + handle + "\",\"text\":\"hi\",\"ts\":" + ts + "}");
+            return call(provider, TransportContract.M_COMMIT, "tok_race", meta);
+        };
+        java.util.concurrent.ExecutorService pool =
+                java.util.concurrent.Executors.newFixedThreadPool(2);
+        java.util.concurrent.Future<Bundle> fa = pool.submit(commit);
+        java.util.concurrent.Future<Bundle> fb = pool.submit(commit);
+        Bundle ra = fa.get(10, java.util.concurrent.TimeUnit.SECONDS);
+        Bundle rb = fb.get(10, java.util.concurrent.TimeUnit.SECONDS);
+        pool.shutdown();
+        // both callers must get the same ref, and the bridge must have
+        // been asked exactly once (the loser found the ledger entry)
+        assertEquals("m82", ra.getString(TransportContract.K_REF));
+        assertEquals("m82", rb.getString(TransportContract.K_REF));
+        assertEquals(1, answered.get());
+        assertEquals(0, dir.list((d, n) -> n.startsWith("SYNC_REQ_")).length);
+    }
+
     private Thread respondOnce(final String respJson) {
         final java.io.File dir = RuntimeEnvironment.getApplication().getFilesDir();
         Thread t = new Thread(new Runnable() {

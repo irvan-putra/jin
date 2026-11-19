@@ -907,6 +907,7 @@ def _publish_watcher(files_dir, control):
 
 SYNC_ALIVE = "SYNC_ALIVE"
 SYNC_GRANTS = "SYNC_GRANTS"
+SYNC_PROCESSED = "SYNC_PROCESSED.json"
 SYNC_CHATS = "SYNC_CHATS"
 SYNC_INBOX = "SYNC_INBOX.jsonl"
 SYNC_INBOX_SEQ = "SYNC_INBOX_SEQ"
@@ -970,6 +971,30 @@ def _sync_resp(files_dir, req_id, payload):
     with open(tmp, "w") as f:
         json.dump(payload, f)
     os.replace(tmp, path)
+
+
+def _sync_send_dedup(files_dir, control, req):
+    """Durable in-flight/idempotency record for send requests, by client
+    token. A token that already produced a SUCCESSFUL response replays that
+    response instead of sending again - this survives watcher restarts and
+    provider crashes between the bridge send and its own ledger write.
+    Failed responses are NOT recorded: a retry after an explicit failure
+    re-attempts the send. Bounded to the newest 500 tokens."""
+    token = str(req.get("id"))
+    path = os.path.join(files_dir, SYNC_PROCESSED)
+    processed = _load_json(path)
+    if token in processed:
+        return processed[token]
+    resp = _sync_send(files_dir, control, req)
+    if resp.get("ok"):
+        processed[token] = resp
+        while len(processed) > 500:
+            processed.pop(next(iter(processed)))
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(processed, f)
+        os.replace(tmp, path)
+    return resp
 
 
 def _sync_send(files_dir, control, req):
@@ -1220,7 +1245,7 @@ def _sync_watcher(files_dir, control):
             try:
                 method = req.get("method")
                 if method == "send":
-                    resp = _sync_send(files_dir, control, req)
+                    resp = _sync_send_dedup(files_dir, control, req)
                 elif method == "listChats":
                     resp = _sync_list_chats(files_dir, control, req)
                 elif method == "poll":

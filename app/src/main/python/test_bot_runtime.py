@@ -1756,6 +1756,41 @@ def test_sync_list_chats_returns_granted_only():
     print("sync listChats scoping ok")
 
 
+def test_sync_send_dedup_replays_response():
+    with tempfile.TemporaryDirectory() as d:
+        calls = []
+        orig = br._sync_send
+        def fake(files_dir, control, req):
+            calls.append(req.get("id"))
+            return {"ok": True, "ref": "m1"}
+        br._sync_send = fake
+        try:
+            req = {"id": "tok_1", "method": "send"}
+            r1 = br._sync_send_dedup(d, None, req)
+            r2 = br._sync_send_dedup(d, None, req)
+        finally:
+            br._sync_send = orig
+        assert r1 == {"ok": True, "ref": "m1"} and r2 == r1
+        # the retry replayed the recorded response, no second send
+        assert calls == ["tok_1"], calls
+        # and the record survives a watcher restart (it lives on disk)
+        r3 = br._sync_send_dedup(d, None, req)
+        assert r3 == r1 and calls == ["tok_1"]
+        # failed responses are NOT deduped: an explicit failure may retry
+        def fail(files_dir, control, req):
+            calls.append(req.get("id"))
+            return {"ok": False, "error": "FAILED"}
+        br._sync_send = fail
+        try:
+            rf1 = br._sync_send_dedup(d, None, {"id": "tok_2", "method": "send"})
+            rf2 = br._sync_send_dedup(d, None, {"id": "tok_2", "method": "send"})
+        finally:
+            br._sync_send = orig
+        assert not rf1["ok"] and not rf2["ok"]
+        assert calls == ["tok_1", "tok_2", "tok_2"], calls
+        print("sync send dedup replay ok")
+
+
 if __name__ == "__main__":
     test_api_conformance()
     test_state_and_binding()
@@ -1808,6 +1843,7 @@ if __name__ == "__main__":
     test_candidate_absent_entry_is_definite_negative()
     test_sync_handle_roundtrip_and_garbage()
     test_sync_send_requires_grant_and_chat()
+    test_sync_send_dedup_replays_response()
     test_sync_poll_scopes_to_callers_chats()
     test_sync_list_chats_returns_granted_only()
     test_sync_poll_prefix_isolation_shared_chat()
