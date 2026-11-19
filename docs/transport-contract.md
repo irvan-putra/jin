@@ -74,10 +74,24 @@ crypto; Android binder identity + package signing pins only.
 ## Dedup and hashing
 - Outbound dedup ledger binds: token + SHA-256 over the canonical metadata
   (method, chat handle, text, filename, mime) + SHA-256 over the staged file
-  bytes.
-- Token reuse with identical hash returns the original message reference
-  (idempotent retry). Token reuse with a different body is rejected as
-  malformed, fail closed. Ledger entries prune after 7 days; use fresh tokens.
+  bytes + the original message reference.
+- Lost commit responses are retriable: a `commit` carrying the same token and
+  the same canonical metadata returns the original reference WITHOUT
+  re-sending, so a caller that never saw the ack recovers it instead of
+  duplicating the message. Text-only sends stay idempotent for the ledger
+  lifetime (7 days).
+- File sends keep the staged bytes after commit (they move to
+  `stage/<token>.bin` and age out with the stage TTL, ~10 minutes) so a retry
+  can re-verify byte identity against the recorded hash. A retry that
+  re-supplies identical bytes, or whose bytes are still retained, returns the
+  original reference. Once the bytes are swept, a bare retry fails visibly
+  with EXPIRED - the caller must re-stage and re-commit with a FRESH token.
+- Re-staging a token that already committed is rejected with TOKEN_REUSED;
+  committing a token with a different body is rejected as malformed, fail
+  closed. Use fresh tokens for new sends.
+- `status(ref)` takes the message reference returned by `commit`, not the
+  client token; the reference is what a successful (or retried) commit
+  returns.
 
 ## Statuses (mapped to what the Delta Chat core actually reports)
 RECEIVED_BY_BIDIK / ACCEPTED_BY_JIN / QUEUED / SENT_TO_RELAY / FAILED(reason) /

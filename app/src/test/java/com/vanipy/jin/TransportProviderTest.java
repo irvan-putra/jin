@@ -96,6 +96,12 @@ public class TransportProviderTest {
         for (String n : new String[]{"SYNC_ALIVE", "SYNC_LEDGER"}) {
             new java.io.File(ctx.getFilesDir(), n).delete();
         }
+        for (String n : ctx.getFilesDir().list()) {
+            if (n.startsWith("SYNC_REQ_") || n.startsWith("SYNC_RESP_"))
+                new java.io.File(ctx.getFilesDir(), n).delete();
+        }
+        java.io.File sd = new java.io.File(ctx.getFilesDir(), "stage");
+        if (sd.isDirectory()) for (java.io.File f : sd.listFiles()) f.delete();
         ShadowBinder.setCallingUid(UID);
         PackageManager pm = ctx.getPackageManager();
         byte[] certBytes = testCertBytes();
@@ -359,6 +365,91 @@ public class TransportProviderTest {
                 + "\",\"filename\":\"x.bin\",\"ts\":" + System.currentTimeMillis() + "}");
         Bundle c = call(provider, TransportContract.M_COMMIT, "tok_nofile1", meta);
         assertEquals(TransportContract.E_STAGE_INCOMPLETE, c.getString(TransportContract.K_ERROR));
+    }
+
+    private Bundle commitOk(String token, String handle, String text,
+                            boolean withFile, byte[] payload) throws Exception {
+        call(provider, TransportContract.M_STAGE, token, null);
+        if (withFile) {
+            stageFile(token, ".part", payload);
+            stageFile(token, ".done", null);
+        }
+        Bundle meta = new Bundle();
+        String m = "{\"chat\":\"" + handle + "\",\"text\":\"" + text + "\""
+                + (withFile ? ",\"filename\":\"x.bin\",\"mime\":\"application/octet-stream\"" : "")
+                + ",\"ts\":" + System.currentTimeMillis() + "}";
+        meta.putString(TransportContract.K_META, m);
+        return call(provider, TransportContract.M_COMMIT, token, meta);
+    }
+
+    @Test
+    public void retryReturnsOriginalRefWithoutResending() throws Exception {
+        grants.setEnabled(PKG, CERT_A, true, "/x");
+        String handle = "aGFuZGxl";
+        grants.setChatScope(PKG, handle, "send", true);
+        botAlive();
+        respondOnce("{\"ok\":true,\"ref\":\"m77\"}");
+        byte[] payload = new byte[5000];
+        java.util.Arrays.fill(payload, (byte) 3);
+        Bundle c1 = commitOk("tok_retry1", handle, "hi", true, payload);
+        assertTrue(c1.getBoolean(TransportContract.K_OK));
+        assertEquals("m77", c1.getString(TransportContract.K_REF));
+        // lost response: the caller retries the same token + same meta
+        Bundle c2 = commitOk("tok_retry1", handle, "hi", true, payload);
+        assertTrue(c2.getBoolean(TransportContract.K_OK));
+        assertEquals("m77", c2.getString(TransportContract.K_REF));
+        // and nothing was handed to the runtime a second time
+        java.io.File dir = RuntimeEnvironment.getApplication().getFilesDir();
+        for (String n : dir.list()) assertFalse(n, n.startsWith("SYNC_REQ_"));
+    }
+
+    @Test
+    public void retryWithDifferentBodyRejected() throws Exception {
+        grants.setEnabled(PKG, CERT_A, true, "/x");
+        String handle = "aGFuZGxl";
+        grants.setChatScope(PKG, handle, "send", true);
+        botAlive();
+        respondOnce("{\"ok\":true,\"ref\":\"m78\"}");
+        Bundle c1 = commitOk("tok_retry2", handle, "hi", false, null);
+        assertTrue(c1.getBoolean(TransportContract.K_OK));
+        Bundle c2 = commitOk("tok_retry2", handle, "CHANGED", false, null);
+        assertEquals(TransportContract.E_TOKEN_REUSED, c2.getString(TransportContract.K_ERROR));
+    }
+
+    @Test
+    public void textOnlyRetryStaysIdempotent() throws Exception {
+        grants.setEnabled(PKG, CERT_A, true, "/x");
+        String handle = "aGFuZGxl";
+        grants.setChatScope(PKG, handle, "send", true);
+        botAlive();
+        respondOnce("{\"ok\":true,\"ref\":\"m79\"}");
+        commitOk("tok_retry3", handle, "hi", false, null);
+        Bundle c2 = commitOk("tok_retry3", handle, "hi", false, null);
+        assertEquals("m79", c2.getString(TransportContract.K_REF));
+    }
+
+    @Test
+    public void fileRetryAfterBytesSweptSaysExpired() throws Exception {
+        grants.setEnabled(PKG, CERT_A, true, "/x");
+        String handle = "aGFuZGxl";
+        grants.setChatScope(PKG, handle, "send", true);
+        botAlive();
+        respondOnce("{\"ok\":true,\"ref\":\"m80\"}");
+        byte[] payload = new byte[100];
+        commitOk("tok_retry4", handle, "hi", true, payload);
+        // simulate the stage-TTL sweep removing the retained bytes, then a
+        // bare commit-only retry (the caller re-sends nothing)
+        new java.io.File(RuntimeEnvironment.getApplication().getFilesDir(),
+                "stage/tok_retry4.bin").delete();
+        Bundle meta = new Bundle();
+        meta.putString(TransportContract.K_META, "{\"chat\":\"" + handle
+                + "\",\"text\":\"hi\",\"filename\":\"x.bin\",\"mime\":\"application/octet-stream\",\"ts\":"
+                + System.currentTimeMillis() + "}");
+        Bundle c2 = call(provider, TransportContract.M_COMMIT, "tok_retry4", meta);
+        assertEquals(TransportContract.E_EXPIRED, c2.getString(TransportContract.K_ERROR));
+        // a retry that DOES re-supply identical bytes still re-verifies to the ref
+        Bundle c3 = commitOk("tok_retry4", handle, "hi", true, payload);
+        assertEquals("m80", c3.getString(TransportContract.K_REF));
     }
 
     @Test

@@ -57,7 +57,8 @@ public class SyncLedger {
         throw new ReuseException();
     }
 
-    public synchronized void put(String token, String hash, String ref) {
+    public synchronized void put(String token, String hash, String metaHash,
+                                 String fileSha, String ref) {
         JSONObject all = load();
         try {
             long now = System.currentTimeMillis();
@@ -67,10 +68,16 @@ public class SyncLedger {
                 if (e != null && now - e.optLong("ts") > PRUNE_AFTER_MS) it.remove();
             }
             JSONObject e = new JSONObject();
-            e.put("hash", hash).put("ref", ref).put("ts", now);
+            e.put("hash", hash).put("metaHash", metaHash)
+             .put("fileSha", fileSha).put("ref", ref).put("ts", now);
             all.put(token, e);
         } catch (JSONException ignored) {}
         save(all);
+    }
+
+    /** @return the ledger entry for a token, or null. */
+    public synchronized JSONObject entry(String token) {
+        return load().optJSONObject(token);
     }
 
     /** @return JSON {status, reason?} for a ref, or null when unknown. */

@@ -157,6 +157,13 @@ public class JinProvider extends ContentProvider {
         return ok();
     }
 
+    private Bundle refBundle(String ref) {
+        Bundle b = ok();
+        b.putString(TransportContract.K_REF, ref);
+        b.putString(TransportContract.K_STATUS, TransportContract.S_QUEUED);
+        return b;
+    }
+
     private Bundle commit(String pkg, String token, Bundle extras) {
         if (!validToken(token)) return err(TransportContract.E_BAD_TOKEN);
         String metaRaw = extras == null ? null : extras.getString(TransportContract.K_META);
@@ -170,7 +177,43 @@ public class JinProvider extends ContentProvider {
         String chat = meta.optString("chat", "");
         if (!grants.isChatSendGranted(pkg, chat)) return err(TransportContract.E_CHAT_NOT_GRANTED);
 
+        // Canonical metadata: method + chat + text + filename/mime. The full
+        // dedup hash appends the file-bytes hash; the metadata hash alone is
+        // what a retry can still be checked against after bytes moved on.
+        String canonMeta = "send|" + chat + "|" + meta.optString("text", "")
+                + "|" + meta.optString("filename", "") + "|" + meta.optString("mime", "");
+        String metaHash = SyncLedger.sha256Hex(canonMeta.getBytes());
+        boolean wantsFile = !meta.optString("filename", "").isEmpty();
+
         File staged = new File(stageDir, token + ".part");
+        File done = new File(stageDir, token + ".done");
+        File overflow = new File(stageDir, token + ".overflow");
+        File bin = new File(stageDir, token + ".bin");
+
+        // Idempotent retry: the token is already in the ledger (an earlier
+        // commit succeeded but its response may have been lost). Return the
+        // original ref when the retry provably carries the same body.
+        JSONObject existing = ledger.entry(token);
+        if (existing != null) {
+            if (!metaHash.equals(existing.optString("metaHash")))
+                return err(TransportContract.E_TOKEN_REUSED);
+            String wantSha = existing.optString("fileSha", "");
+            if (wantSha.isEmpty())
+                return refBundle(existing.optString("ref")); // text-only: no bytes to re-verify
+            File f = bin.exists() ? bin
+                    : (staged.exists() && done.exists() ? staged : null);
+            if (f == null) {
+                // staged bytes swept after the TTL window: identity can no
+                // longer be re-verified, so say so instead of guessing
+                return err(TransportContract.E_EXPIRED);
+            }
+            try {
+                if (!SyncLedger.sha256Hex(readAll(f)).equals(wantSha))
+                    return err(TransportContract.E_TOKEN_REUSED);
+            } catch (IOException e) { return err(TransportContract.E_MALFORMED); }
+            return refBundle(existing.optString("ref"));
+        }
+
         if (staged.exists() && !stageTokenLive(token)) {
             staged.delete();
             return err(TransportContract.E_BAD_TOKEN); // expired staging token
@@ -178,9 +221,6 @@ public class JinProvider extends ContentProvider {
         // A caller can close() its pipe end and commit before the drain thread
         // has consumed the final bytes: wait (bounded) for the drain's EOF
         // marker so the hash never covers truncated bytes.
-        File done = new File(stageDir, token + ".done");
-        File overflow = new File(stageDir, token + ".overflow");
-        boolean wantsFile = !meta.optString("filename", "").isEmpty();
         if (staged.exists() && !done.exists() && !overflow.exists()) {
             long deadline = System.currentTimeMillis() + 5000;
             while (System.currentTimeMillis() < deadline
@@ -206,22 +246,7 @@ public class JinProvider extends ContentProvider {
         } else if (wantsFile) {
             return err(TransportContract.E_STAGE_INCOMPLETE); // stream never arrived
         }
-        // Canonical metadata: method + chat + text (+ filename/mime when a file is attached).
-        String canon = "send|" + chat + "|" + meta.optString("text", "")
-                + "|" + meta.optString("filename", "") + "|" + meta.optString("mime", "")
-                + "|" + fileSha;
-        String hash = SyncLedger.sha256Hex(canon.getBytes());
-        try {
-            String existing = ledger.check(token, hash);
-            if (existing != null) {
-                Bundle b = ok();
-                b.putString(TransportContract.K_REF, existing);
-                b.putString(TransportContract.K_STATUS, TransportContract.S_QUEUED);
-                return b; // idempotent retry
-            }
-        } catch (SyncLedger.ReuseException e) {
-            return err(TransportContract.E_TOKEN_REUSED);
-        }
+        String hash = SyncLedger.sha256Hex((canonMeta + "|" + fileSha).getBytes());
 
         // Hand to the python runtime through the SYNC file bridge (PUBLISH_REQ pattern).
         try {
@@ -230,12 +255,12 @@ public class JinProvider extends ContentProvider {
                .put("chat", chat).put("text", meta.optString("text", ""))
                .put("hash", hash).put("ts", System.currentTimeMillis());
             if (fileBytes != null) {
-                File out = new File(stageDir, token + ".bin");
-                FileOutputStream fo = new FileOutputStream(out);
+                FileOutputStream fo = new FileOutputStream(bin);
                 fo.write(fileBytes);
                 fo.close();
                 staged.delete();
-                req.put("file", out.getName())
+                done.delete();
+                req.put("file", bin.getName())
                    .put("filename", meta.optString("filename", ""))
                    .put("mime", meta.optString("mime", ""));
             }
@@ -253,11 +278,8 @@ public class JinProvider extends ContentProvider {
         if (resp == null) return err(TransportContract.E_BOT_NOT_RUNNING);
         if (resp.optBoolean("ok")) {
             String ref = resp.optString("ref");
-            ledger.put(token, hash, ref);
-            Bundle b = ok();
-            b.putString(TransportContract.K_REF, ref);
-            b.putString(TransportContract.K_STATUS, TransportContract.S_QUEUED);
-            return b;
+            ledger.put(token, hash, metaHash, fileSha, ref);
+            return refBundle(ref);
         }
         return err(resp.optString("error", TransportContract.E_MALFORMED));
     }

@@ -44,6 +44,7 @@ public final class TransportContract {
     public static final String E_UNKNOWN_METHOD = "UNKNOWN_METHOD";
     public static final String E_FUTURE_TS = "FUTURE_TIMESTAMP";
     public static final String E_STAGE_INCOMPLETE = "STAGE_INCOMPLETE";
+    public static final String E_EXPIRED = "EXPIRED";
     public static final String E_CHAT_NOT_GRANTED = "CHAT_NOT_GRANTED";
 
     public static final String S_ACCEPTED = "ACCEPTED_BY_JIN";

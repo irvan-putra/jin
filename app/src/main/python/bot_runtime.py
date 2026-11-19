@@ -1021,11 +1021,8 @@ def _sync_send(files_dir, control, req):
         json.dump(refs, f)
     os.replace(tmp, os.path.join(files_dir, SYNC_REFS))
     _sync_status_write(files_dir, ref, "QUEUED")
-    if path:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+    # the staged bin is left for the stage-TTL sweep: a same-token retry whose
+    # response was lost re-verifies against these bytes to get its ref back
     return {"ok": True, "ref": ref}
 
 
