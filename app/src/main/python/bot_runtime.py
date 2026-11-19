@@ -1335,6 +1335,37 @@ def run(native_lib_dir, files_dir):
                 pass
 
 
+class _FixtureControl:
+    """Account-less control for the offline transport fixture: lets the SYNC
+    bridge serve real provider traffic (auth, grants, pipes, bridge round
+    trip, failure mapping) with NO account, NO network and NO core run.
+    Sends fail visibly at the rpc boundary; inbound stays empty by
+    construction, so a poll returns an honest empty page."""
+
+    def __init__(self, files_dir):
+        self.files_dir = files_dir
+        self.account = None
+        self.bot_addr = load_state(files_dir).get(
+            "bot_addr", "bot-fixture@fixture.invalid")
+
+    def _st(self):
+        return load_state(self.files_dir)
+
+    def _served_chat_ids(self):
+        return {int(c) for c in (self._st().get("chats") or {})}
+
+
+def run_sync_fixture(files_dir):
+    """Offline SYNC-bridge fixture: runs the same watcher the live bot runs,
+    against a fixture control. Used by the on-device emulator gate."""
+    flag = os.path.join(files_dir, STOP_FLAG)
+    try:
+        os.unlink(flag)
+    except FileNotFoundError:
+        pass
+    _sync_watcher(files_dir, _FixtureControl(files_dir))
+
+
 def service_entry(native_lib_dir, files_dir, mode):
     """Java entry point. mode: 'provision' | 'live'. Logs to files_dir/bot.log."""
     h = logging.FileHandler(os.path.join(files_dir, "bot.log"))
@@ -1351,6 +1382,8 @@ def service_entry(native_lib_dir, files_dir, mode):
             log.info("PROVISION DONE addr=%s", addr)
         elif mode == "live":
             run(native_lib_dir, files_dir)
+        elif mode == "syncfixture":
+            run_sync_fixture(files_dir)
         elif mode == "export":
             # Activity stops the live service first; the quiescent DB is
             # exported here. The transfer code goes ONLY to EXPORT_RESULT

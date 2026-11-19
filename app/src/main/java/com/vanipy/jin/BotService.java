@@ -40,6 +40,7 @@ public class BotService extends Service {
         String label = mode.equals("live") ? "itdxdc delivery bot running"
                 : mode.equals("provision") ? "creating bot account"
                 : mode.equals("export") ? "exporting bot for itdapk"
+                : mode.equals("syncfixture") ? "offline transport fixture running"
                 : "offline validation running";
         Notification.Builder nb = Build.VERSION.SDK_INT >= 26
                 ? new Notification.Builder(this, "bot") : new Notification.Builder(this);
