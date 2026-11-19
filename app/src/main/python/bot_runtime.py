@@ -952,11 +952,16 @@ def _sync_grants(files_dir):
     return _load_json(os.path.join(files_dir, SYNC_GRANTS))
 
 
+SYNC_INBOX_KEEP = 500
+
+
 def _sync_pkg_chats(files_dir, pkg):
+    """@return (send_handles, recv_handles, prefix) or None when not granted."""
     g = _sync_grants(files_dir).get(pkg) or {}
     if not g.get("enabled"):
         return None
-    return set(g.get("chats") or []), g.get("prefix") or ""
+    return (set(g.get("chats_send") or []), set(g.get("chats_recv") or []),
+            g.get("prefix") or "")
 
 
 def _sync_resp(files_dir, req_id, payload):
@@ -973,9 +978,9 @@ def _sync_send(files_dir, control, req):
     granted = _sync_pkg_chats(files_dir, pkg)
     if not granted:
         return {"ok": False, "error": "NOT_AUTHORIZED"}
-    chats, _prefix = granted
+    send_chats, _recv, _prefix = granted
     handle = req.get("chat", "")
-    if handle not in chats:
+    if handle not in send_chats:
         return {"ok": False, "error": "CHAT_NOT_GRANTED"}
     addr, cid, gen = _sync_decode_handle(handle)
     st = control._st()
@@ -1063,8 +1068,11 @@ def _sync_on_new_message(files_dir, account, event):
     for pkg, g in grants.items():
         if not g.get("enabled"):
             continue
-        for h in g.get("chats") or []:
-            prefixes.setdefault(h, set()).add(g.get("prefix") or "")
+        pfx = g.get("prefix") or ""
+        if not pfx:
+            continue  # no prefix: no capture (fail closed)
+        for h in g.get("chats_recv") or []:
+            prefixes.setdefault(h, set()).add(pfx)
     if not prefixes:
         return
     by_cid = {}
@@ -1100,10 +1108,22 @@ def _sync_on_new_message(files_dir, account, event):
     seq += 1
     with open(seq_path, "w") as f:
         f.write(str(seq))
-    with open(os.path.join(files_dir, SYNC_INBOX), "a") as f:
+    inbox = os.path.join(files_dir, SYNC_INBOX)
+    with open(inbox, "a") as f:
         json.dump({"seq": seq, "ts": int(time.time()), "chat": handle,
                    "from": sender, "text": text}, f)
         f.write("\n")
+    if seq % 25 == 0:  # bounded retention: keep the newest SYNC_INBOX_KEEP
+        try:
+            with open(inbox) as f:
+                lines = f.readlines()
+            if len(lines) > SYNC_INBOX_KEEP:
+                tmp = inbox + ".tmp"
+                with open(tmp, "w") as f:
+                    f.writelines(lines[-SYNC_INBOX_KEEP:])
+                os.replace(tmp, inbox)
+        except OSError:
+            pass
 
 
 def _sync_poll(files_dir, req):
@@ -1111,12 +1131,12 @@ def _sync_poll(files_dir, req):
     granted = _sync_pkg_chats(files_dir, pkg)
     if not granted:
         return {"ok": False, "error": "NOT_AUTHORIZED"}
-    chats, _p = granted
+    _send, recv_chats, prefix = granted
     try:
         cursor = int(req.get("cursor") or 0)
     except (TypeError, ValueError):
         return {"ok": False, "error": "MALFORMED"}
-    items, max_seq = [], cursor
+    items, max_seq, min_seen = [], cursor, None
     path = os.path.join(files_dir, SYNC_INBOX)
     if os.path.exists(path):
         with open(path) as f:
@@ -1125,12 +1145,21 @@ def _sync_poll(files_dir, req):
                     e = json.loads(line)
                 except Exception:
                     continue
-                if e.get("seq", 0) > cursor and e.get("chat") in chats:
+                if min_seen is None:
+                    min_seen = e.get("seq")
+                if (e.get("seq", 0) > cursor and e.get("chat") in recv_chats
+                        and prefix and (e.get("text") or "").startswith(prefix)):
                     items.append(e)
                     max_seq = max(max_seq, e["seq"])
                 if len(items) >= 100:
                     break
-    return {"ok": True, "items": json.dumps(items), "cursor": str(max_seq)}
+    resp = {"ok": True, "items": json.dumps(items), "cursor": str(max_seq)}
+    # visible gap: the caller's cursor points at entries retention already
+    # dropped, so commands may have been missed - say so, never silently skip
+    if min_seen is not None and cursor and cursor < min_seen - 1:
+        resp["gap"] = True
+        resp["first_available"] = str(min_seen)
+    return resp
 
 
 def _sync_list_chats(files_dir, control, req):
@@ -1138,10 +1167,12 @@ def _sync_list_chats(files_dir, control, req):
     granted = _sync_pkg_chats(files_dir, pkg)
     if not granted:
         return {"ok": False, "error": "NOT_AUTHORIZED"}
-    chats, _p = granted
+    send_chats, recv_chats, _p = granted
     names = _sync_chat_names(control)
-    items = [{"handle": h, "name": names.get(cid, str(cid))}
-             for h, cid in _sync_handles(files_dir, control) if h in chats]
+    items = [{"handle": h, "name": names.get(cid, str(cid)),
+              "send": h in send_chats, "recv": h in recv_chats}
+             for h, cid in _sync_handles(files_dir, control)
+             if h in send_chats or h in recv_chats]
     return {"ok": True, "items": json.dumps(items)}
 
 

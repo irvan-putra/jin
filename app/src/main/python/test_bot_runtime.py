@@ -1627,25 +1627,34 @@ def test_sync_send_requires_grant_and_chat():
         r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": h, "text": "hi"})
         assert r == {"ok": False, "error": "NOT_AUTHORIZED"}, r
         # grant enabled but chat not listed -> CHAT_NOT_GRANTED
-        _write_grants(d, {"com.x": {"enabled": True, "prefix": "/x", "chats": []}})
+        _write_grants(d, {"com.x": {"enabled": True, "prefix": "/x",
+                                    "chats_send": [], "chats_recv": []}})
+        r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": h, "text": "hi"})
+        assert r == {"ok": False, "error": "CHAT_NOT_GRANTED"}, r
+        # recv-only scope does NOT authorize sending
+        _write_grants(d, {"com.x": {"enabled": True, "prefix": "/x",
+                                    "chats_send": [], "chats_recv": [h]}})
         r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": h, "text": "hi"})
         assert r == {"ok": False, "error": "CHAT_NOT_GRANTED"}, r
         # chat granted but disabled grant -> NOT_AUTHORIZED
-        _write_grants(d, {"com.x": {"enabled": False, "prefix": "/x", "chats": [h]}})
+        _write_grants(d, {"com.x": {"enabled": False, "prefix": "/x",
+                                    "chats_send": [h], "chats_recv": []}})
         r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": h, "text": "hi"})
         assert r == {"ok": False, "error": "NOT_AUTHORIZED"}, r
         # granted chat but handle from another account/generation -> MALFORMED
         other = _mk_handle("other@relay.example", 11, 7)
         old_gen = _mk_handle(ctl.bot_addr, 11, 6)
         _write_grants(d, {"com.x": {"enabled": True, "prefix": "/x",
-                                    "chats": [other, old_gen]}})
+                                    "chats_send": [other, old_gen],
+                                    "chats_recv": []}})
         r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": other, "text": "hi"})
         assert r == {"ok": False, "error": "MALFORMED"}, r
         r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": old_gen, "text": "hi"})
         assert r == {"ok": False, "error": "MALFORMED"}, r
         # unserved (revoked/unknown) chat id -> MALFORMED
         unserved = _mk_handle(ctl.bot_addr, 99, 7)
-        _write_grants(d, {"com.x": {"enabled": True, "prefix": "/x", "chats": [unserved]}})
+        _write_grants(d, {"com.x": {"enabled": True, "prefix": "/x",
+                                    "chats_send": [unserved], "chats_recv": []}})
         r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": unserved, "text": "hi"})
         assert r == {"ok": False, "error": "MALFORMED"}, r
     print("sync send grant gates ok")
@@ -1656,8 +1665,10 @@ def test_sync_poll_scopes_to_callers_chats():
         h_a = _mk_handle("bot@nine.testrun.org", 11, 7)
         h_b = _mk_handle("bot@nine.testrun.org", 12, 7)
         _write_grants(d, {
-            "com.a": {"enabled": True, "prefix": "/a", "chats": [h_a]},
-            "com.b": {"enabled": True, "prefix": "/b", "chats": [h_b]},
+            "com.a": {"enabled": True, "prefix": "/a",
+                      "chats_send": [], "chats_recv": [h_a]},
+            "com.b": {"enabled": True, "prefix": "/b",
+                      "chats_send": [], "chats_recv": [h_b]},
         })
         with open(os.path.join(d, br.SYNC_INBOX), "w") as f:
             for seq, h, txt in [(1, h_a, "/a hi"), (2, h_b, "/b yo"), (3, h_a, "/a again")]:
@@ -1682,11 +1693,59 @@ def test_sync_poll_scopes_to_callers_chats():
     print("sync poll scoping ok")
 
 
+def test_sync_poll_prefix_isolation_shared_chat():
+    """Two apps granted the SAME chat each see only their own prefix."""
+    with tempfile.TemporaryDirectory() as d:
+        h = _mk_handle("bot@nine.testrun.org", 11, 7)
+        _write_grants(d, {
+            "com.a": {"enabled": True, "prefix": "/a",
+                      "chats_send": [], "chats_recv": [h]},
+            "com.b": {"enabled": True, "prefix": "/b",
+                      "chats_send": [], "chats_recv": [h]},
+        })
+        with open(os.path.join(d, br.SYNC_INBOX), "w") as f:
+            for seq, txt in [(1, "/a one"), (2, "/b two"), (3, "/a three"),
+                             (4, "no prefix at all")]:
+                f.write(json.dumps({"seq": seq, "ts": 1, "chat": h,
+                                    "from": "u@x", "text": txt}) + "\n")
+        ra = json.loads(br._sync_poll(d, {"pkg": "com.a", "cursor": "0"})["items"])
+        assert [i["seq"] for i in ra] == [1, 3], ra
+        rb = json.loads(br._sync_poll(d, {"pkg": "com.b", "cursor": "0"})["items"])
+        assert [i["seq"] for i in rb] == [2], rb
+        # send-scope-only app reads nothing even from its own chat
+        _write_grants(d, {"com.c": {"enabled": True, "prefix": "/a",
+                                    "chats_send": [h], "chats_recv": []}})
+        rc = br._sync_poll(d, {"pkg": "com.c", "cursor": "0"})
+        assert json.loads(rc["items"]) == []
+    print("sync poll prefix isolation ok")
+
+
+def test_sync_poll_gap_is_visible():
+    with tempfile.TemporaryDirectory() as d:
+        h = _mk_handle("bot@nine.testrun.org", 11, 7)
+        _write_grants(d, {"com.a": {"enabled": True, "prefix": "/a",
+                                    "chats_send": [], "chats_recv": [h]}})
+        with open(os.path.join(d, br.SYNC_INBOX), "w") as f:
+            for seq in (40, 41):  # caller cursor at 10: entries 11-39 dropped
+                f.write(json.dumps({"seq": seq, "ts": 1, "chat": h,
+                                    "from": "u@x", "text": "/a x"}) + "\n")
+        r = br._sync_poll(d, {"pkg": "com.a", "cursor": "10"})
+        assert r.get("gap") is True and r.get("first_available") == "40", r
+        # no gap when the cursor is current
+        r = br._sync_poll(d, {"pkg": "com.a", "cursor": "41"})
+        assert "gap" not in r, r
+        # no gap for a fresh caller at cursor 0
+        r = br._sync_poll(d, {"pkg": "com.a", "cursor": "0"})
+        assert "gap" not in r, r
+    print("sync poll gap visibility ok")
+
+
 def test_sync_list_chats_returns_granted_only():
     with tempfile.TemporaryDirectory() as d:
         ctl = _StubControl(d)
         h_a = _mk_handle(ctl.bot_addr, 11, 7)
-        _write_grants(d, {"com.a": {"enabled": True, "prefix": "/a", "chats": [h_a]}})
+        _write_grants(d, {"com.a": {"enabled": True, "prefix": "/a",
+                                    "chats_send": [], "chats_recv": [h_a]}})
         # names need the rpc client; _sync_chat_names fails over to str(cid)
         # when the client import/chat call fails, which is what happens here
         r = br._sync_list_chats(d, ctl, {"pkg": "com.a"})
@@ -1751,4 +1810,6 @@ if __name__ == "__main__":
     test_sync_send_requires_grant_and_chat()
     test_sync_poll_scopes_to_callers_chats()
     test_sync_list_chats_returns_granted_only()
+    test_sync_poll_prefix_isolation_shared_chat()
+    test_sync_poll_gap_is_visible()
     print("ALL WRAPPER TESTS PASS")

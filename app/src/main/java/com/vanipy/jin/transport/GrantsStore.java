@@ -40,16 +40,24 @@ public class GrantsStore {
                 JSONObject out = new JSONObject();
                 out.put("enabled", g.optBoolean("enabled"));
                 out.put("prefix", g.optString("prefix", ""));
-                JSONArray chats = new JSONArray();
+                JSONArray send = new JSONArray();
+                JSONArray recv = new JSONArray();
                 JSONObject cj = g.optJSONObject("chats");
                 if (cj != null) {
                     Iterator<String> it = cj.keys();
                     while (it.hasNext()) {
                         String h = it.next();
-                        if (cj.optBoolean(h)) chats.put(h);
+                        JSONObject sc = cj.optJSONObject(h);
+                        if (sc != null) {
+                            if (sc.optBoolean("send")) send.put(h);
+                            if (sc.optBoolean("recv")) recv.put(h);
+                        } else if (cj.optBoolean(h)) {
+                            send.put(h);  // legacy single-scope entry: send only
+                        }
                     }
                 }
-                out.put("chats", chats);
+                out.put("chats_send", send);
+                out.put("chats_recv", recv);
                 root.put(pkg, out);
             }
             java.io.File tmp = new java.io.File(mirror.getParentFile(), "SYNC_GRANTS.tmp");
@@ -121,11 +129,23 @@ public class GrantsStore {
         return g != null && g.optBoolean("enabled") && cert.equals(g.optString("cert"));
     }
 
-    public boolean isChatGranted(String pkg, String handle) {
+    private boolean scopeGranted(String pkg, String handle, String scope) {
         JSONObject g = grantJson(pkg);
         if (g == null || !g.optBoolean("enabled")) return false;
         JSONObject chats = g.optJSONObject("chats");
-        return chats != null && chats.optBoolean(handle);
+        if (chats == null) return false;
+        JSONObject sc = chats.optJSONObject(handle);
+        if (sc != null) return sc.optBoolean(scope);
+        // legacy single-scope entries count as send-only
+        return "send".equals(scope) && chats.optBoolean(handle);
+    }
+
+    public boolean isChatSendGranted(String pkg, String handle) {
+        return scopeGranted(pkg, handle, "send");
+    }
+
+    public boolean isChatRecvGranted(String pkg, String handle) {
+        return scopeGranted(pkg, handle, "recv");
     }
 
     public String prefixFor(String pkg) {
@@ -133,7 +153,7 @@ public class GrantsStore {
         return g == null ? "" : g.optString("prefix", "");
     }
 
-    public List<String> grantedChats(String pkg) {
+    public List<String> grantedChats(String pkg, String scope) {
         List<String> out = new ArrayList<>();
         JSONObject g = grantJson(pkg);
         if (g == null) return out;
@@ -142,7 +162,9 @@ public class GrantsStore {
             Iterator<String> it = chats.keys();
             while (it.hasNext()) {
                 String h = it.next();
-                if (chats.optBoolean(h)) out.add(h);
+                JSONObject sc = chats.optJSONObject(h);
+                if (sc != null) { if (sc.optBoolean(scope)) out.add(h); }
+                else if ("send".equals(scope) && chats.optBoolean(h)) out.add(h);
             }
         }
         return out;
@@ -160,13 +182,20 @@ public class GrantsStore {
         writeMirror();
     }
 
-    public synchronized void setChatGranted(String pkg, String handle, boolean granted) {
+    public synchronized void setChatScope(String pkg, String handle, String scope, boolean granted) {
         JSONObject g = grantJson(pkg);
         if (g == null) return;
         try {
             JSONObject chats = g.optJSONObject("chats");
             if (chats == null) chats = new JSONObject();
-            chats.put(handle, granted);
+            JSONObject sc = chats.optJSONObject(handle);
+            if (sc == null) sc = new JSONObject();
+            sc.put(scope, granted);
+            if (!sc.optBoolean("send") && !sc.optBoolean("recv")) {
+                chats.remove(handle);
+            } else {
+                chats.put(handle, sc);
+            }
             g.put("chats", chats).put("updated", System.currentTimeMillis());
             prefs.edit().putString("grant." + pkg, g.toString()).apply();
         } catch (JSONException ignored) {}

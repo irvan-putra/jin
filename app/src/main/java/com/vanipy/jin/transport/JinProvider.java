@@ -164,7 +164,7 @@ public class JinProvider extends ContentProvider {
         if (clientTs > System.currentTimeMillis() + TransportContract.MAX_FUTURE_SKEW_MS)
             return err(TransportContract.E_FUTURE_TS);
         String chat = meta.optString("chat", "");
-        if (!grants.isChatGranted(pkg, chat)) return err(TransportContract.E_CHAT_NOT_GRANTED);
+        if (!grants.isChatSendGranted(pkg, chat)) return err(TransportContract.E_CHAT_NOT_GRANTED);
 
         File staged = new File(stageDir, token + ".part");
         if (staged.exists() && !stageTokenLive(token)) {

@@ -715,16 +715,26 @@ public class MainActivity extends Activity {
             return;
         }
         String[] labels = new String[chats.size()];
-        boolean[] checked = new boolean[chats.size()];
+        for (int i = 0; i < chats.size(); i++) labels[i] = chats.get(i)[1];
+        boolean[] send = new boolean[chats.size()];
+        boolean[] recv = new boolean[chats.size()];
         for (int i = 0; i < chats.size(); i++) {
-            labels[i] = chats.get(i)[1];
-            checked[i] = store.isChatGranted(pkg, chats.get(i)[0]);
+            send[i] = store.isChatSendGranted(pkg, chats.get(i)[0]);
+            recv[i] = store.isChatRecvGranted(pkg, chats.get(i)[0]);
         }
+        String pfx = store.prefixFor(pkg);
         new android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-            .setTitle(pkg + ": chats it may use")
-            .setMultiChoiceItems(labels, checked,
-                (d, which, isChecked) -> store.setChatGranted(pkg, chats.get(which)[0], isChecked))
-            .setPositiveButton("Done", null)
+            .setTitle(pkg + " may SEND messages into:")
+            .setMultiChoiceItems(labels, send,
+                (d, which, isChecked) -> store.setChatScope(pkg, chats.get(which)[0], "send", isChecked))
+            .setPositiveButton("Next", (d, w) ->
+                new android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                    .setTitle(pkg + " may READ " + (pfx.isEmpty() ? "its" : pfx) + " commands from:")
+                    .setMultiChoiceItems(labels, recv,
+                        (d2, which, isChecked) -> store.setChatScope(pkg, chats.get(which)[0], "recv", isChecked))
+                    .setPositiveButton("Done", null)
+                    .show())
+            .setNegativeButton("Cancel", null)
             .show();
     }
 }
