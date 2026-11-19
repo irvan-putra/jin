@@ -13,6 +13,10 @@ adb wait-for-device
 adb install -r "$APK"
 adb shell pm grant $PKG android.permission.POST_NOTIFICATIONS || true
 adb logcat -c || true
+# API 34 refuses a background FGS launch ("app is in background"), so
+# foreground the app first, then start the bot service.
+adb shell am start -W -n $PKG/.MainActivity >/dev/null
+sleep 3
 adb shell am startservice -n $PKG/.BotService
 
 # Translation is slow: allow up to 8 minutes for the validation probe.
