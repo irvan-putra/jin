@@ -35,9 +35,11 @@ import org.robolectric.shadows.ShadowAlertDialog;
  * onCreate never starts Python, so the tests touch no core/account/network.
  * All bot state below is synthetic (fixture address, no real account data).
  */
+// xxhdpi = 480dpi: the 1080px-wide canvas is then 360dp, a real phone width
+// (Galaxy A24 renders ~396ppi, bucketed xxhdpi), not a tablet-width render.
 @RunWith(RobolectricTestRunner.class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(sdk = 32)
+@Config(sdk = 32, qualifiers = "xxhdpi")
 public class MainActivityRenderTest {
 
     private static final String FIXTURE_ADDR = "bot-fixture@chatmail.example";
@@ -86,6 +88,12 @@ public class MainActivityRenderTest {
         assertEquals(View.GONE, a.findViewById(R.id.publishButton).getVisibility());
         assertEquals(View.GONE, a.findViewById(R.id.stopButton).getVisibility());
         renderToPng(a, "/tmp/jin-0-setup.png");
+        // Accessibility check: 1.3x font scale must still lay out without
+        // pushing controls off the screen (the content scrolls instead).
+        RuntimeEnvironment.setFontScale(1.3f);
+        Activity big = freshActivity();
+        renderToPng(big, "/tmp/jin-0-setup-fontscale.png");
+        RuntimeEnvironment.setFontScale(1.0f);
     }
 
     @Test
