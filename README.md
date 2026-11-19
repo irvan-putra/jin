@@ -1,78 +1,82 @@
-Note (15 Nov 2026): this repo contains the standalone validation builds used
-while developing the phone-side DeltaChat bot runtime. The runtime later moved
-into [intodo](https://github.com/irvan-putra/intodo) as itdapk's embedded bot -
-see intodo for the current source and releases. The text below describes these
-validation builds as they were.
+# jin — run a DeltaChat bot from your phone
 
----
+jin turns an Android phone into a small bot host: it creates the bot's own
+chatmail account, answers messages in the chats you invite it to, and
+delivers webxdc apps (`.xdc` files) to those chats. Everything runs on the
+phone as a foreground service; the only network traffic is IMAP/SMTP to the
+public chatmail relay. No Google push, no third-party servers.
 
-# Jin - intodo bot validation (0.3, r12)
+The bot's trust model is Delta Chat's own contact flow: whoever holds the
+bot's invitation QR can reach it. Any accepted chat is served with its own
+isolated list — a group gets a shared list, a direct chat gets a personal
+list. There is no owner identity and no chat-side management; all management
+is app-side.
 
-scratch 0.3 keeps the 0.2 OFFLINE probe and adds a LIVE mode: the v6.1
-delivery bot running on-device as a foreground service with its own dedicated
-chatmail account. Trust model: Delta Chat's contact/invitation flow IS the
-boundary - whoever holds the bot's invitation QR can reach it. Any accepted
-chat is served with its own isolated list: a group gets a shared list, a
-direct chat gets a personal list. There is no owner identity and no
-chat-side management; all management and publishing is app-side. The
-background model follows the official DeltaChat-Android F-Droid flavor: no
-Google push, no third-party servers beyond the chatmail relay.
+## Using jin
 
-Buttons (each an explicit tap; nothing runs by itself):
-1. Offline validation probe - identical to 0.2, no network.
-2. Create bot account - one-time, network: provisions ONE dedicated profile
-   on the public chatmail relay via its dcaccount invite. The bot's OWN
-   identity, never the user's personal account; the address is shown in the
-   app.
-3. Start/stop the bot service - permanent-notification foreground service
-   (specialUse type, START_STICKY). Stop writes a STOP flag; the python
-   watchdog closes the RPC and exits (real stop, single-run lock).
-4. Show the invitation QR - SecureJoin setup-contact QR (SVG + text) of the
-   RUNNING account, generated on demand by the live loop (INVITE_REQ /
-   INVITE_DONE file IPC). The QR text is a bearer invitation: it is never
-   logged.
-5. Export bot for itdapk - pauses the live bot and writes ONE encrypted
-   .dcmig bundle (account backup + bot state) protected by a one-time
-   transfer code; see integration/MIGRATION.md.
-6. Publish new app version - pick a .xdc; the app stores it under an
-   immutable content-addressed name and queues an atomic request
-   (PUBLISH_REQ: basename + per-request token). The live loop fans it out
-   to every served chat with the v6.1 headline flow (per-chat packed list
-   identity, bot-origin registration, full canonical history replay),
-   writes a per-chat checkpoint (PUBLISH_PROG) and finally the correlated
-   result (PUBLISH_DONE). The UI matches the result to its request by
-   token + sha256 and reattaches across activity recreation. A chat that
-   misses a publish (added later, revoked at the time, relay failure) is
-   healed lazily on its next traffic: the runtime remembers the current
-   published version and re-delivers into that chat only - never deleting
-   old instances, never downgrading a newer one.
+1. **Create bot account** — one tap, one time. jin provisions ONE dedicated
+   profile on the public chatmail relay via its dcaccount invite. This is the
+   bot's own identity, never your personal account; the address is shown in
+   the app.
+2. **Start bot** — a permanent-notification foreground service
+   (`specialUse` type, `START_STICKY`), same background model as the official
+   DeltaChat-Android F-Droid flavor. Stopping the bot writes a STOP flag;
+   the runtime closes its connection and exits (real stop, single-run lock).
+3. **Show invitation QR** — the bot's SecureJoin setup-contact QR, generated
+   on demand. Scan it from another device, or on the same phone tap
+   "Open in DeltaChat", then send the bot any message. Add the bot to any
+   chat: each group gets its own shared list and each direct chat its own
+   personal list, kept separate. The QR text is a bearer invitation and is
+   never logged.
+4. **Publish new app version (.xdc)** — pick a `.xdc` file; the bot sends it
+   to every chat it serves, with per-chat checkpoints and a correlated
+   result. A chat that misses a publish is healed lazily on its next
+   traffic — never deleting old instances, never downgrading a newer one.
 
-Trust and isolation:
-- Contact requests stay refused (core's own boundary).
-- Removal: when the core records the bot removed from a chat, access
-  pauses; the list id, registrations and store file are kept, and re-adding
-  resumes the same list (core chat ids are stable across remove/re-add).
-  A revoked chat resumes only on grounded rejoin evidence - a late
-  in-flight message alone never revokes the pause.
-- Each served chat gets its OWN OpsStore (ops-<id>.db), its OWN stable
-  list id and its OWN v6.1 gate/bridge; histories never mix across chats.
-- No chat-originated input can publish or administer: the per-chat gates
-  are built with no owner address, so their DM command surface refuses
-  everyone by construction.
-- Network: IMAP/SMTP to the chatmail relay only. No Firebase, no microG.
+**Diagnostics, logs and export** live in the left-edge menu: swipe from the
+left edge of the screen, or long-press anywhere. The menu holds the log
+viewer, the offline validation probe (no network), and "Export bot for
+itdapk", which pauses the live bot and writes ONE encrypted `.dcmig` bundle
+(account backup + bot state) protected by a one-time transfer code — see
+[integration/MIGRATION.md](integration/MIGRATION.md).
 
-Build (host: JDK 17, Android SDK 34, gradle 8.9):
+## Trust and isolation
+
+- Contact requests stay refused (the core's own boundary).
+- Removal: when the core records the bot removed from a chat, access pauses;
+  the list id, registrations and store file are kept, and re-adding resumes
+  the same list (core chat ids are stable across remove/re-add). A revoked
+  chat resumes only on grounded rejoin evidence — a late in-flight message
+  alone never revokes the pause.
+- Each served chat gets its OWN OpsStore (`ops-<id>.db`), its OWN stable
+  list id and its OWN gate/bridge; histories never mix across chats.
+- No chat-originated input can publish or administer: the per-chat gates are
+  built with no owner address, so their DM command surface refuses everyone
+  by construction.
+
+## Related projects
+
+- [intodo](https://github.com/irvan-putra/intodo) embeds this same bot
+  runtime inside itdapk, alongside the todo lists it serves. jin is the
+  standalone runner.
+
+## Build
+
+Host: JDK 17, Android SDK 34, gradle 8.7:
+
     gradle :app:assembleRelease
+
 The APK is arm64-v8a only (the bundled Delta Chat core lib exists for no
 other ABI). Native libs ship compressed (legacy packaging,
-extractNativeLibs=true); zipalign before signing.
+`extractNativeLibs=true`); zipalign before signing.
 
 Local JVM tests (Robolectric, no device, no network/core):
+
     gradle -Pandroid.useAndroidX=true :app:testDebugUnitTest
-Covers the publish IPC contract (immutable file, atomic request, DONE
-dedup, pending REQ/PROG refusal, recreation reattach) and a native-graphics
-render of the initial UI. The python wrapper suite
-(app/src/main/python/test_bot_runtime.py) runs the trust/isolation model
-against the shipped modules; test_scan_e2e.py (repo root in the task
-workspace, not shipped) drives the same membership scenarios against a real
-deltachat-rpc-server 2.69.0.
+
+They cover the publish IPC contract (immutable file, atomic request, DONE
+dedup, pending REQ/PROG refusal, recreation reattach), the screen's state
+machine and click wiring, and native-graphics renders of the three bot
+states plus the diagnostics menu. The python wrapper suite
+(`app/src/main/python/test_bot_runtime.py`) runs the trust/isolation model
+against the shipped modules.

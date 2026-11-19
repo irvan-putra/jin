@@ -5,15 +5,20 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.view.View;
 import android.webkit.WebView;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import androidx.core.view.GravityCompat;
+import androidx.core.view.ViewCompat;
+import androidx.drawerlayout.widget.DrawerLayout;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -22,120 +27,63 @@ import java.io.InputStream;
 import org.json.JSONObject;
 
 public class MainActivity extends Activity {
-    private TextView logView;
-    private LinearLayout candBox;
+    // Bot states, computed from the runtime's own files (no parallel bookkeeping):
+    //   SETUP   - no bot account yet
+    //   READY   - account created, service stopped
+    //   RUNNING - live bot service running
+    private static final int SETUP = 0, READY = 1, RUNNING = 2;
+
+    private DrawerLayout drawer;
+    private TextView statusTitle, statusText, statusMeta, versionText;
+    private Button primary, publishBtn, stopBtn;
     private final Handler handler = new Handler();
-    private String lastStateJson = "";
+    private String lastFingerprint = null;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        Button validate = new Button(this); validate.setText("1. Offline validation probe (no network)");
-        Button provision = new Button(this); provision.setText("2. Create bot account (ONE-TIME, uses network)");
-        Button live = new Button(this); live.setText("3. Start/restart bot service (network; permanent notification, uses battery)");
-        Button invite = new Button(this); invite.setText("4. Show invitation QR (scan it from your DeltaChat)");
-        Button stop = new Button(this); stop.setText("Stop service");
-        Button export = new Button(this); export.setText("5. Export bot for itdapk (pauses live bot)");
-        Button publish = new Button(this); publish.setText("6. Publish new app version (.xdc) to all chats");
-        candBox = new LinearLayout(this); candBox.setOrientation(LinearLayout.VERTICAL);
-        logView = new TextView(this);
-        ScrollView sv = new ScrollView(this); sv.addView(logView);
-        TextView steps = new TextView(this);
-        steps.setText("Setup: 1 probe, 2 create account, 3 start bot, 4 show the invitation - on this same phone tap 'Open in DeltaChat' in its dialog (or scan the QR from another device), then send the bot any message. Add the bot to any chat: each group gets its own shared list and each direct chat its own personal list, kept separate. Button 6 publishes a new .xdc from this app to every chat the bot serves.");
-        root.addView(steps);
-        root.addView(validate); root.addView(provision); root.addView(live); root.addView(invite); root.addView(stop);
-        root.addView(export);
-        root.addView(publish);
-        root.addView(candBox); root.addView(sv);
-        setContentView(root);
+        setContentView(R.layout.activity_main);
+        drawer = findViewById(R.id.drawerLayout);
+        statusTitle = findViewById(R.id.statusTitle);
+        statusText = findViewById(R.id.statusText);
+        statusMeta = findViewById(R.id.statusMeta);
+        primary = findViewById(R.id.primaryButton);
+        publishBtn = findViewById(R.id.publishButton);
+        stopBtn = findViewById(R.id.stopButton);
+        versionText = findViewById(R.id.versionText);
 
         if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1);
         }
-        validate.setOnClickListener(v -> startMode("validate"));
-        provision.setOnClickListener(v -> startMode("provision"));
-        live.setOnClickListener(v -> {
-            // Battery cost disclosure + exemption prompt before first live start.
-            if (Build.VERSION.SDK_INT >= 23) {
-                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
-                if (!pm.isIgnoringBatteryOptimizations(getPackageName())) {
-                    new android.app.AlertDialog.Builder(this)
-                        .setTitle("Background battery use")
-                        .setMessage("The bot keeps a permanent notification and a low-power connection to the chatmail relay so it can deliver updates at any time. This uses some battery. Android will next ask to exclude this app from battery optimization; stopping the service (Stop button) releases everything.")
-                        .setPositiveButton("Continue", (d, w) -> {
-                            try {
-                                startActivity(new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                        android.net.Uri.parse("package:" + getPackageName())));
-                            } catch (Exception ignored) {}
-                            startMode("live");
-                        })
-                        .setNegativeButton("Cancel", null)
-                        .show();
-                    return;
-                }
-            }
-            startMode("live");
-        });
-        invite.setOnClickListener(v -> {
-            File stf = new File(getFilesDir(), "bot_state.json");
-            String js = stf.exists() ? read(stf) : "";
-            String botAddr = "";
-            try { botAddr = new JSONObject(js).optString("bot_addr", ""); } catch (Exception ignored) {}
-            if (botAddr.isEmpty() || botAddr.equals("null")) {
-                Toast.makeText(this, "Create the bot account first (button 2)", Toast.LENGTH_LONG).show();
-                return;
-            }
-            if (!new File(getFilesDir(), "RUNNING").exists()) {
-                Toast.makeText(this, "Start the bot service first (button 3)", Toast.LENGTH_LONG).show();
-                return;
-            }
-            new File(getFilesDir(), "INVITE_DONE").delete();
-            try { new FileWriter(new File(getFilesDir(), "INVITE_REQ")).close(); }
-            catch (Exception e) { return; }
-            Toast.makeText(this, "Preparing the invitation...", Toast.LENGTH_SHORT).show();
-            final long tap = System.currentTimeMillis();
-            final Runnable[] poll = new Runnable[1];
-            poll[0] = new Runnable() { public void run() {
-                File done = new File(getFilesDir(), "INVITE_DONE");
-                File svg = new File(getFilesDir(), "invite.svg");
-                if (done.exists() && svg.exists() && svg.lastModified() >= tap) {
-                    WebView w = new WebView(MainActivity.this);
-                    w.getSettings().setAllowFileAccess(true);
-                    w.loadUrl("file://" + svg.getAbsolutePath());
-                    new android.app.AlertDialog.Builder(MainActivity.this)
-                        .setTitle("Bot invitation - scan it from your DeltaChat")
-                        .setView(w)
-                        // Same-device pairing: the QR content IS the deep link
-                        // (openpgp4fpr scheme, handled by Delta Chat's exported
-                        // RoutingActivity VIEW filter -> checkQr -> SecureJoin).
-                        .setPositiveButton("Open in DeltaChat", (d, which) -> {
-                            String qr = read(new File(getFilesDir(), "invite.txt")).trim();
-                            try {
-                                startActivity(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(qr)));
-                            } catch (Exception e) {
-                                Toast.makeText(MainActivity.this, "Delta Chat app not found - scan the QR instead", Toast.LENGTH_LONG).show();
-                            }
-                        })
-                        .setNegativeButton("Close", null)
-                        .show();
-                } else if (System.currentTimeMillis() - tap < 10000) {
-                    handler.postDelayed(poll[0], 500);
-                } else {
-                    Toast.makeText(MainActivity.this, "QR not ready - is the bot service running?", Toast.LENGTH_LONG).show();
-                }
-            }};
-            handler.postDelayed(poll[0], 500);
-        });
-        stop.setOnClickListener(v -> {
+
+        primary.setOnClickListener(v -> onPrimary());
+        publishBtn.setOnClickListener(v -> startPublishFlow());
+        stopBtn.setOnClickListener(v -> {
             // Clear the persisted mode first so START_STICKY / the boot
             // receiver treat this as a real stop, not a restart request.
             getSharedPreferences("bot", MODE_PRIVATE).edit().putString("last_mode", "").apply();
             stopService(new Intent(this, BotService.class));
         });
-        export.setOnClickListener(v -> startExportFlow());
-        publish.setOnClickListener(v -> startPublishFlow());
+        findViewById(R.id.menuProbe).setOnClickListener(v -> {
+            drawer.closeDrawer(GravityCompat.START);
+            startMode("validate");
+            Toast.makeText(this, "Offline probe running - see View logs for its output", Toast.LENGTH_LONG).show();
+        });
+        findViewById(R.id.menuLogs).setOnClickListener(v -> showLogs());
+        findViewById(R.id.menuExport).setOnClickListener(v -> {
+            drawer.closeDrawer(GravityCompat.START);
+            startExportFlow();
+        });
+
+        try {
+            android.content.pm.PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            long vc = Build.VERSION.SDK_INT >= 28 ? pi.getLongVersionCode() : pi.versionCode;
+            versionText.setText("jin " + pi.versionName + " (" + vc + ")");
+        } catch (Exception ignored) {}
+
+        // Menu without visible chrome, same as intodo: left-edge swipe (DrawerLayout)
+        // plus long-press anywhere / a TalkBack action as the accessible fallback.
+        installMenuAccess(findViewById(R.id.contentRoot));
 
         // Reattach to a publish that is still in flight across recreation:
         // the request or its crash-resume checkpoint must still exist, and
@@ -163,31 +111,197 @@ public class MainActivity extends Activity {
         handler.post(tick);
     }
 
+    // ---- state + rendering ----------------------------------------------
+
+    private int botState() {
+        if (new File(getFilesDir(), "RUNNING").exists()) return RUNNING;
+        return botAddr().isEmpty() ? SETUP : READY;
+    }
+
+    private String botAddr() {
+        File stf = new File(getFilesDir(), "bot_state.json");
+        if (!stf.exists()) return "";
+        try {
+            String a = new JSONObject(read(stf)).optString("bot_addr", "");
+            return a.equals("null") ? "" : a;
+        } catch (Exception e) { return ""; }
+    }
+
+    private int servedChatCount() {
+        File stf = new File(getFilesDir(), "bot_state.json");
+        if (!stf.exists()) return 0;
+        try {
+            JSONObject chats = new JSONObject(read(stf)).optJSONObject("chats");
+            return chats == null ? 0 : chats.length();
+        } catch (Exception e) { return 0; }
+    }
+
+    private void onPrimary() {
+        switch (botState()) {
+            case SETUP:
+                startMode("provision");
+                Toast.makeText(this, "Creating the bot account...", Toast.LENGTH_SHORT).show();
+                break;
+            case READY:
+                startLiveWithBatteryPrompt();
+                break;
+            default:
+                showInvite();
+        }
+    }
+
+    private void render() {
+        switch (botState()) {
+            case SETUP:
+                statusTitle.setText("Set up your bot");
+                statusText.setText("jin runs a DeltaChat bot on this phone. The bot gets its own account on a public chatmail relay; your personal DeltaChat account is never used.\n\nSetup: 1) create the bot account, 2) start the bot, 3) show its invitation and scan it from DeltaChat, then send the bot a message.");
+                statusMeta.setText("Each chat the bot joins gets its own separate list: a group shares one, a direct chat stays personal.");
+                primary.setText("Create bot account");
+                primary.setVisibility(View.VISIBLE);
+                publishBtn.setVisibility(View.GONE);
+                stopBtn.setVisibility(View.GONE);
+                break;
+            case READY:
+                statusTitle.setText("Bot account ready");
+                statusText.setText("Bot address: " + botAddr());
+                statusMeta.setText("Start the bot so it can answer messages and deliver your apps. It keeps working while this app is closed (permanent notification).");
+                primary.setText("Start bot");
+                primary.setVisibility(View.VISIBLE);
+                publishBtn.setVisibility(View.GONE);
+                stopBtn.setVisibility(View.GONE);
+                break;
+            default:
+                int n = servedChatCount();
+                statusTitle.setText("Bot is running");
+                statusText.setText("Bot address: " + botAddr());
+                statusMeta.setText(n == 0
+                        ? "No chats yet - show the invitation and scan it from DeltaChat, then send the bot any message."
+                        : "Serving " + n + (n == 1 ? " chat." : " chats."));
+                primary.setText("Show invitation QR");
+                primary.setVisibility(View.VISIBLE);
+                publishBtn.setVisibility(View.VISIBLE);
+                stopBtn.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private void refresh() {
+        File f = new File(getFilesDir(), "bot_state.json");
+        String fp = (f.exists() ? read(f) : "") + "|" + botState();
+        if (fp.equals(lastFingerprint)) return;
+        lastFingerprint = fp;
+        render();
+    }
+
+    private void startLiveWithBatteryPrompt() {
+        // Battery cost disclosure + exemption prompt before first live start.
+        if (Build.VERSION.SDK_INT >= 23) {
+            android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+            if (!pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                new android.app.AlertDialog.Builder(this)
+                    .setTitle("Background battery use")
+                    .setMessage("The bot keeps a permanent notification and a low-power connection to the chatmail relay so it can deliver updates at any time. This uses some battery. Android will next ask to exclude this app from battery optimization; stopping the bot releases everything.")
+                    .setPositiveButton("Continue", (d, w) -> {
+                        try {
+                            startActivity(new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                    android.net.Uri.parse("package:" + getPackageName())));
+                        } catch (Exception ignored) {}
+                        startMode("live");
+                    })
+                    .setNegativeButton("Cancel", null)
+                    .show();
+                return;
+            }
+        }
+        startMode("live");
+    }
+
+    private void showInvite() {
+        if (!new File(getFilesDir(), "RUNNING").exists()) {
+            Toast.makeText(this, "Start the bot first", Toast.LENGTH_LONG).show();
+            return;
+        }
+        new File(getFilesDir(), "INVITE_DONE").delete();
+        try { new FileWriter(new File(getFilesDir(), "INVITE_REQ")).close(); }
+        catch (Exception e) { return; }
+        Toast.makeText(this, "Preparing the invitation...", Toast.LENGTH_SHORT).show();
+        final long tap = System.currentTimeMillis();
+        final Runnable[] poll = new Runnable[1];
+        poll[0] = new Runnable() { public void run() {
+            File done = new File(getFilesDir(), "INVITE_DONE");
+            File svg = new File(getFilesDir(), "invite.svg");
+            if (done.exists() && svg.exists() && svg.lastModified() >= tap) {
+                WebView w = new WebView(MainActivity.this);
+                w.getSettings().setAllowFileAccess(true);
+                w.loadUrl("file://" + svg.getAbsolutePath());
+                new android.app.AlertDialog.Builder(MainActivity.this)
+                    .setTitle("Bot invitation - scan it from your DeltaChat")
+                    .setView(w)
+                    // Same-device pairing: the QR content IS the deep link
+                    // (openpgp4fpr scheme, handled by Delta Chat's exported
+                    // RoutingActivity VIEW filter -> checkQr -> SecureJoin).
+                    .setPositiveButton("Open in DeltaChat", (d, which) -> {
+                        String qr = read(new File(getFilesDir(), "invite.txt")).trim();
+                        try {
+                            startActivity(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse(qr)));
+                        } catch (Exception e) {
+                            Toast.makeText(MainActivity.this, "Delta Chat app not found - scan the QR instead", Toast.LENGTH_LONG).show();
+                        }
+                    })
+                    .setNegativeButton("Close", null)
+                    .show();
+            } else if (System.currentTimeMillis() - tap < 10000) {
+                handler.postDelayed(poll[0], 500);
+            } else {
+                Toast.makeText(MainActivity.this, "QR not ready - is the bot service running?", Toast.LENGTH_LONG).show();
+            }
+        }};
+        handler.postDelayed(poll[0], 500);
+    }
+
+    private void showLogs() {
+        TextView tv = new TextView(this);
+        tv.setText(readLog());
+        tv.setTextIsSelectable(true);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setTextSize(11f);
+        int pad = (int) (16 * getResources().getDisplayMetrics().density);
+        tv.setPadding(pad, pad, pad, pad);
+        ScrollView sv = new ScrollView(this);
+        sv.addView(tv);
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("Logs")
+            .setView(sv)
+            .setPositiveButton("Close", null)
+            .show();
+    }
+
+    private void installMenuAccess(View v) {
+        v.setOnLongClickListener(view -> {
+            drawer.openDrawer(GravityCompat.START);
+            return true;
+        });
+        ViewCompat.addAccessibilityAction(v, "Open menu", (view, args) -> {
+            drawer.openDrawer(GravityCompat.START);
+            return true;
+        });
+    }
+
+    @Override public void onBackPressed() {
+        // an open menu consumes Back first; only a shut menu leaves the activity
+        if (drawer.isDrawerOpen(GravityCompat.START)) {
+            drawer.closeDrawer(GravityCompat.START);
+            return;
+        }
+        super.onBackPressed();
+    }
+
     private void startMode(String mode) {
         Intent i = new Intent(this, BotService.class);
         i.putExtra("mode", mode);
         startForegroundService(i);
     }
 
-    private void refresh() {
-        File f = new File(getFilesDir(), "bot_state.json");
-        String json = f.exists() ? read(f) : "";
-        logView.setText(readLog());
-        if (json.equals(lastStateJson)) return;
-        lastStateJson = json;
-        candBox.removeAllViews();
-        if (json.isEmpty()) return;
-        try {
-            JSONObject st = new JSONObject(json);
-            String botAddr = st.optString("bot_addr", "");
-            TextView t = new TextView(this);
-            if (!botAddr.isEmpty()) t.setText("bot: " + botAddr + "   ");
-            t.setText(t.getText() + "chats served: " + st.optString("chats", "{}"));
-            candBox.addView(t);
-        } catch (Exception ignored) {}
-    }
-
-    // ---- export flow (scratch -> itdapk migration) ----------------------
+    // ---- export flow (jin -> itdapk migration) --------------------------
     private static final int REQ_SAVE_BUNDLE = 42;
     private String pendingBundlePath = null;
 
@@ -197,12 +311,12 @@ public class MainActivity extends Activity {
         boolean prov = false;
         try { prov = new JSONObject(js).optBoolean("provisioned", false); } catch (Exception ignored) {}
         if (!prov) {
-            Toast.makeText(this, "Create the bot account first (button 2)", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Create the bot account first", Toast.LENGTH_LONG).show();
             return;
         }
         new android.app.AlertDialog.Builder(this)
             .setTitle("Export bot for itdapk")
-            .setMessage("This pauses the live bot and writes ONE protected bundle holding the bot's Delta Chat account AND its owner/chat state, both encrypted with a one-time transfer code shown next.\n\nKeep the bundle file and the code private: together they ARE the bot. You pick where the file goes and copy the code yourself; nothing is sent anywhere.\n\nThe live bot stays paused until the import finishes in itdapk (or resume it here with button 3).")
+            .setMessage("This pauses the live bot and writes ONE protected bundle holding the bot's Delta Chat account AND its owner/chat state, both encrypted with a one-time transfer code shown next.\n\nKeep the bundle file and the code private: together they ARE the bot. You pick where the file goes and copy the code yourself; nothing is sent anywhere.\n\nThe live bot stays paused until the import finishes in itdapk (or start the bot again here to resume it).")
             .setPositiveButton("Export", (d, w) -> runExportAfterStop())
             .setNegativeButton("Cancel", null)
             .show();
@@ -222,7 +336,7 @@ public class MainActivity extends Activity {
             } else if (System.currentTimeMillis() - t0 < 15000) {
                 handler.postDelayed(poll[0], 500);
             } else {
-                Toast.makeText(MainActivity.this, "Live bot did not stop in time - tap Stop service, then retry", Toast.LENGTH_LONG).show();
+                Toast.makeText(MainActivity.this, "Live bot did not stop in time - stop the bot, then retry", Toast.LENGTH_LONG).show();
             }
         }};
         handler.postDelayed(poll[0], 500);
@@ -289,7 +403,7 @@ public class MainActivity extends Activity {
                 Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
                 i.addCategory(android.content.Intent.CATEGORY_OPENABLE);
                 i.setType("application/octet-stream");
-                i.putExtra(Intent.EXTRA_TITLE, "dcbot-migration-0.3-r12.dcmig");
+                i.putExtra(Intent.EXTRA_TITLE, "jin-bot-export.dcmig");
                 startActivityForResult(i, REQ_SAVE_BUNDLE);
             })
             .setNegativeButton("Abort + resume bot", (d, w) -> abortExport())
@@ -324,11 +438,11 @@ public class MainActivity extends Activity {
         boolean prov = false;
         try { prov = new JSONObject(js).optBoolean("provisioned", false); } catch (Exception ignored) {}
         if (!prov) {
-            Toast.makeText(this, "Create the bot account first (button 2)", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Create the bot account first", Toast.LENGTH_LONG).show();
             return;
         }
         if (!new File(getFilesDir(), "RUNNING").exists()) {
-            Toast.makeText(this, "Start the bot service first (button 3)", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Start the bot first", Toast.LENGTH_LONG).show();
             return;
         }
         new android.app.AlertDialog.Builder(this)
@@ -508,7 +622,7 @@ public class MainActivity extends Activity {
             new File(getFilesDir(), "EXPORT_RESULT").delete();
             new android.app.AlertDialog.Builder(this)
                 .setTitle("Bundle saved")
-                .setMessage("In itdapk: choose 'Import bot backup', pick this file, enter the transfer code.\n\nThe live bot here stays PAUSED. Only uninstall this app after itdapk shows the bot running with the same address. Button 3 resumes this bot if you abort the migration.")
+                .setMessage("In itdapk: choose 'Import bot backup', pick this file, enter the transfer code.\n\nThe live bot here stays PAUSED. Only uninstall this app after itdapk shows the bot running with the same address. Starting the bot again here resumes it if you abort the migration.")
                 .setPositiveButton("OK", null)
                 .show();
         } catch (Exception e) {
