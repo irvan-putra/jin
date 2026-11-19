@@ -131,10 +131,18 @@ public class JinProvider extends ContentProvider {
 
     private Bundle stage(String token) {
         if (!validToken(token)) return err(TransportContract.E_BAD_TOKEN);
-        try {
-            if (ledger.check(token, "") != null) return err(TransportContract.E_TOKEN_REUSED);
-        } catch (SyncLedger.ReuseException e) {
-            return err(TransportContract.E_TOKEN_REUSED);
+        // A token already in the ledger MAY be re-staged: it is the recovery
+        // route for a lost commit response after the retained bytes were
+        // swept. commit() re-verifies metadata and byte identity against the
+        // ledger entry and returns the original ref, never a duplicate send.
+        // A fresh token for the same logical send WOULD duplicate, so the
+        // contract forbids it. Only byte/meta mismatches stay TOKEN_REUSED.
+        if (ledger.entry(token) == null) {
+            try {
+                if (ledger.check(token, "") != null) return err(TransportContract.E_TOKEN_REUSED);
+            } catch (SyncLedger.ReuseException e) {
+                return err(TransportContract.E_TOKEN_REUSED);
+            }
         }
         getContext().getSharedPreferences("transport_stage", 0).edit()
             .putLong("ts." + token, System.currentTimeMillis()).apply();

@@ -82,13 +82,19 @@ crypto; Android binder identity + package signing pins only.
   lifetime (7 days).
 - File sends keep the staged bytes after commit (they move to
   `stage/<token>.bin` and age out with the stage TTL, ~10 minutes) so a retry
-  can re-verify byte identity against the recorded hash. A retry that
-  re-supplies identical bytes, or whose bytes are still retained, returns the
-  original reference. Once the bytes are swept, a bare retry fails visibly
-  with EXPIRED - the caller must re-stage and re-commit with a FRESH token.
-- Re-staging a token that already committed is rejected with TOKEN_REUSED;
-  committing a token with a different body is rejected as malformed, fail
-  closed. Use fresh tokens for new sends.
+  can re-verify byte identity against the recorded hash. A retry whose bytes
+  are still retained, or that re-supplies identical bytes, returns the
+  original reference. Once the retained bytes are swept, a BARE retry fails
+  visibly with EXPIRED.
+- Recovery after EXPIRED is SAME-token, never fresh-token: the caller
+  re-stages the same token with the same bytes and commits the same metadata.
+  The provider re-verifies both against the ledger entry (7-day lifetime) and
+  returns the original reference without re-sending. Minting a fresh token to
+  retry the same logical send is a contract violation: a fresh token is a NEW
+  send and silently duplicates the message when the original commit landed.
+- Re-staged bytes or metadata that do NOT match the ledger entry are rejected
+  with TOKEN_REUSED, fail closed. Use fresh tokens only for genuinely new
+  sends.
 - `status(ref)` takes the message reference returned by `commit`, not the
   client token; the reference is what a successful (or retried) commit
   returns.

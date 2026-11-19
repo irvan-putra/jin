@@ -447,9 +447,38 @@ public class TransportProviderTest {
                 + System.currentTimeMillis() + "}");
         Bundle c2 = call(provider, TransportContract.M_COMMIT, "tok_retry4", meta);
         assertEquals(TransportContract.E_EXPIRED, c2.getString(TransportContract.K_ERROR));
-        // a retry that DOES re-supply identical bytes still re-verifies to the ref
+        // recovery is same-token re-stage with identical bytes: ref returns,
+        // and provably no second send leaves the provider (no new SYNC_REQ)
         Bundle c3 = commitOk("tok_retry4", handle, "hi", true, payload);
         assertEquals("m80", c3.getString(TransportContract.K_REF));
+        long deadline = System.currentTimeMillis() + 1000;
+        while (System.currentTimeMillis() < deadline) {
+            if (RuntimeEnvironment.getApplication().getFilesDir()
+                    .list((d, n) -> n.startsWith("SYNC_REQ_")).length == 0) break;
+            Thread.sleep(20);
+        }
+        assertEquals(0, RuntimeEnvironment.getApplication().getFilesDir()
+                .list((d, n) -> n.startsWith("SYNC_REQ_")).length);
+    }
+
+    @Test
+    public void restagedDifferentBytesAfterSweepRejected() throws Exception {
+        grants.setEnabled(PKG, CERT_A, true, "/x");
+        String handle = "aGFuZGxl";
+        grants.setChatScope(PKG, handle, "send", true);
+        botAlive();
+        respondOnce("{\"ok\":true,\"ref\":\"m81\"}");
+        byte[] payload = new byte[4000];
+        java.util.Arrays.fill(payload, (byte) 5);
+        Bundle c1 = commitOk("tok_retry5", handle, "hi", true, payload);
+        assertTrue(c1.getBoolean(TransportContract.K_OK));
+        new java.io.File(RuntimeEnvironment.getApplication().getFilesDir(),
+                "stage/tok_retry5.bin").delete();
+        // same token, same metadata, but re-staged bytes differ: fail closed
+        byte[] other = new byte[4000];
+        java.util.Arrays.fill(other, (byte) 9);
+        Bundle c2 = commitOk("tok_retry5", handle, "hi", true, other);
+        assertEquals(TransportContract.E_TOKEN_REUSED, c2.getString(TransportContract.K_ERROR));
     }
 
     @Test
