@@ -34,11 +34,11 @@ runprobe ungranted
 if [ -z "$PROBE_CERT_SHA256" ]; then echo "PROBE_CERT_SHA256 not set" >&2; exit 1; fi
 printf '%s' "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
 <map><string name=\"grant.com.vanipy.jinprobe\">{\"cert\":\"$PROBE_CERT_SHA256\",\"enabled\":true,\"prefix\":\"/probe\",\"chats\":{\"$HANDLE\":{\"send\":true,\"recv\":true}},\"updated\":1}</string></map>" \
-  | adb shell run-as $JIN sh -c 'mkdir -p shared_prefs && cat > shared_prefs/transport_grants.xml'
+  | adb shell "run-as $JIN sh -c 'mkdir -p shared_prefs && cat > shared_prefs/transport_grants.xml'"
 printf '%s' "{\"com.vanipy.jinprobe\":{\"enabled\":true,\"prefix\":\"/probe\",\"chats_send\":[\"$HANDLE\"],\"chats_recv\":[\"$HANDLE\"]}}" \
-  | adb shell run-as $JIN sh -c 'cat > files/SYNC_GRANTS'
+  | adb shell "run-as $JIN sh -c 'cat > files/SYNC_GRANTS'"
 printf '%s' '{"provisioned":true,"bot_addr":"bot-fixture@fixture.invalid","acct_gen":1,"chats":{"11":{}}}' \
-  | adb shell run-as $JIN sh -c 'cat > files/bot_state.json'
+  | adb shell "run-as $JIN sh -c 'cat > files/bot_state.json'"
 adb shell am force-stop $JIN
 
 # Phase 3: granted caller while the bot is down must see BOT_NOT_RUNNING,
@@ -81,14 +81,14 @@ adb shell run-as $PROBE cat files/probe-swept.log
 
 # Phase 7: inbound capture through the REAL hook, driven by injected
 # synthetic messages: prefix isolation for this caller.
-printf '%s' '{"chat_id":11,"text":"/probe hello","msg_id":1001}' | adb shell run-as $JIN sh -c 'cat > files/FIXTURE_INJECT_a'
-printf '%s' '{"chat_id":11,"text":"/other x","msg_id":1002}' | adb shell run-as $JIN sh -c 'cat > files/FIXTURE_INJECT_b'
-printf '%s' '{"chat_id":11,"text":"no prefix at all","msg_id":1003}' | adb shell run-as $JIN sh -c 'cat > files/FIXTURE_INJECT_c'
+printf '%s' '{"chat_id":11,"text":"/probe hello","msg_id":1001}' | adb shell "run-as $JIN sh -c 'cat > files/FIXTURE_INJECT_a'"
+printf '%s' '{"chat_id":11,"text":"/other x","msg_id":1002}' | adb shell "run-as $JIN sh -c 'cat > files/FIXTURE_INJECT_b'"
+printf '%s' '{"chat_id":11,"text":"no prefix at all","msg_id":1003}' | adb shell "run-as $JIN sh -c 'cat > files/FIXTURE_INJECT_c'"
 sleep 4
 runprobe inbound
 
 # Phase 8: retention overflow: an old cursor must see gap+first_available.
-printf '%s' '{"chat_id":11,"text":"/probe bulk","msg_id":2000,"fill":510}' | adb shell run-as $JIN sh -c 'cat > files/FIXTURE_INJECT_d'
+printf '%s' '{"chat_id":11,"text":"/probe bulk","msg_id":2000,"fill":510}' | adb shell "run-as $JIN sh -c 'cat > files/FIXTURE_INJECT_d'"
 sleep 8
 runprobe gap
 
