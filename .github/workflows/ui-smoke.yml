@@ -141,9 +141,12 @@ jobs:
       - name: Build jin + probe APKs
         run: gradle --no-daemon :app:assembleDebug :probe:assembleDebug
       - name: Probe signing cert hash
+        # apksigner, not keytool: AGP debug APKs are v2-signed, which
+        # keytool -printcert -jarfile cannot read. Provider pins UPPERCASE hex.
         id: cert
         run: |
-          echo "sha256=$(keytool -printcert -jarfile probe/build/outputs/apk/debug/probe-debug.apk | grep -m1 'SHA256:' | sed 's/.*SHA256: //' | tr -d ':')" >> "$GITHUB_OUTPUT"
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          echo "sha256=$("$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs probe/build/outputs/apk/debug/probe-debug.apk | grep -m1 'SHA-256 digest:' | sed 's/.*SHA-256 digest: //' | tr 'a-f' 'A-F')" >> "$GITHUB_OUTPUT"
       - name: Transport gate on ARM-translating emulator
         uses: reactivecircus/android-emulator-runner@9b78b339fcface67c267bcf3f3af3fd5430c6401 # v2.33.0
         with:
