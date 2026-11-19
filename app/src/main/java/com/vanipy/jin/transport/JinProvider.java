@@ -231,6 +231,9 @@ public class JinProvider extends ContentProvider {
                 if (!SyncLedger.sha256Hex(readAll(f)).equals(wantSha))
                     return err(TransportContract.E_TOKEN_REUSED);
             } catch (IOException e) { return err(TransportContract.E_MALFORMED); }
+            // a verified re-stage has served its purpose: clear it, or a
+            // later "bare" retry would silently re-verify these bytes
+            if (f == staged) { staged.delete(); done.delete(); }
             return refBundle(existing.optString("ref"));
         }
 

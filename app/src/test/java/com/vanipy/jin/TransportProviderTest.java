@@ -509,6 +509,10 @@ public class TransportProviderTest {
         // and provably no second send leaves the provider (no new SYNC_REQ)
         Bundle c3 = commitOk("tok_retry4", handle, "hi", true, payload);
         assertEquals("m80", c3.getString(TransportContract.K_REF));
+        // a verified re-stage is consumed: a later bare retry must not find it
+        java.io.File sd = new java.io.File(RuntimeEnvironment.getApplication().getFilesDir(), "stage");
+        assertFalse(new java.io.File(sd, "tok_retry4.part").exists());
+        assertFalse(new java.io.File(sd, "tok_retry4.done").exists());
         long deadline = System.currentTimeMillis() + 1000;
         while (System.currentTimeMillis() < deadline) {
             if (RuntimeEnvironment.getApplication().getFilesDir()

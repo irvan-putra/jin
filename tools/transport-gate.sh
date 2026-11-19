@@ -89,7 +89,16 @@ runprobe inbound
 
 # Phase 8: retention overflow: an old cursor must see gap+first_available.
 printf '%s' '{"chat_id":11,"text":"/probe bulk","msg_id":2000,"fill":510}' | adb shell "run-as $JIN sh -c 'cat > files/FIXTURE_INJECT_d'"
-sleep 8
+# wait for the bulk inject to finish: 3 earlier + 510 bulk = seq 513
+# (translation is slow; a fixed sleep raced the capture loop)
+i=0
+while [ $i -lt 150 ]; do
+  SEQ=$(adb shell run-as $JIN cat files/SYNC_INBOX_SEQ 2>/dev/null || echo 0)
+  case "$SEQ" in ''|*[!0-9]*) SEQ=0 ;; esac
+  [ "$SEQ" -ge 513 ] && break
+  sleep 2; i=$((i+1))
+done
+echo "inbox seq reached $SEQ"
 runprobe gap
 
 # any probe FAIL line or nonzero failure count fails the job
