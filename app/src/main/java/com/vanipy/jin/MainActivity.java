@@ -446,7 +446,7 @@ public class MainActivity extends Activity {
             return;
         }
         new android.app.AlertDialog.Builder(this)
-            .setTitle("Publish new app version")
+            .setTitle("Publish new mini app version")
             .setMessage("Pick the new .xdc file. The bot sends it to EVERY chat it serves (each group and each direct chat with the bot).")
             .setPositiveButton("Pick .xdc", (d, w) -> {
                 Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);

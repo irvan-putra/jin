@@ -38,7 +38,7 @@
 
                 <Button android:id="@+id/publishButton" android:layout_width="match_parent" android:layout_height="wrap_content"
                     android:layout_marginTop="10dp" android:minHeight="48dp" android:textAllCaps="false"
-                    android:text="Publish new app version (.xdc)"
+                    android:text="Publish new mini app (.xdc) version"
                     android:background="@drawable/btn_square_dark" android:textColor="#D0D5DD" />
 
                 <Button android:id="@+id/stopButton" android:layout_width="match_parent" android:layout_height="wrap_content"
