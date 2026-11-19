@@ -1355,14 +1355,108 @@ class _FixtureControl:
         return {int(c) for c in (self._st().get("chats") or {})}
 
 
+class _FixtureMsg:
+    def __init__(self, snap):
+        self._snap = snap
+
+    def get_snapshot(self):
+        return self._snap
+
+
+class _FixtureSelfContact:
+    id = 1
+
+
+class _FixtureAccount:
+    """Just enough of the rpc account surface for the REAL capture hook."""
+    self_contact = _FixtureSelfContact()
+
+    def __init__(self):
+        self._msgs = {}
+
+    def get_message_by_id(self, mid):
+        return self._msgs[mid]
+
+
+class _FixtureChat:
+    """Synthetic rpc-boundary Chat for the fixture: every send succeeds
+    (unless files_dir/FIXTURE_RPC_DOWN exists, simulating core failure) and
+    is logged to fixture-sends.jsonl so the gate can count real send calls.
+    This proves the provider/bridge/dedup machinery only - it is NOT a
+    relay delivery of any kind."""
+    _next = [9000]
+    _dir = ["."]
+
+    def __init__(self, account, chat_id):
+        self.chat_id = chat_id
+
+    def send_message(self, text=None, file=None, filename=None):
+        if os.path.exists(os.path.join(_FixtureChat._dir[0], "FIXTURE_RPC_DOWN")):
+            raise RuntimeError("fixture rpc down")
+        _FixtureChat._next[0] += 1
+        with open(os.path.join(_FixtureChat._dir[0], "fixture-sends.jsonl"),
+                  "a") as f:
+            json.dump({"id": _FixtureChat._next[0], "chat_id": self.chat_id,
+                       "text": text, "file": file, "filename": filename}, f)
+            f.write("\n")
+        m = _FixtureMsg({"id": _FixtureChat._next[0]})
+        m.id = _FixtureChat._next[0]
+        return m
+
+    def get_basic_snapshot(self):
+        return {"name": "fixture chat %s" % self.chat_id}
+
+
+def _fixture_inject_loop(files_dir, acct, stop):
+    """Applies FIXTURE_INJECT_*.json specs through the REAL inbound capture
+    hook: {chat_id, text, from, msg_id, fill} -> _sync_on_new_message."""
+    import types
+    while not os.path.exists(stop):
+        try:
+            for n in sorted(os.listdir(files_dir)):
+                if not n.startswith("FIXTURE_INJECT_"):
+                    continue
+                spec = _load_json(os.path.join(files_dir, n))
+                try:
+                    os.unlink(os.path.join(files_dir, n))
+                except OSError:
+                    continue
+                for k in range(int(spec.get("fill") or 1)):
+                    mid = int(spec.get("msg_id") or 1000) + k
+                    acct._msgs[mid] = _FixtureMsg({
+                        "chat_id": int(spec.get("chat_id") or 11),
+                        "text": spec.get("text") or "",
+                        "from_id": 2,
+                        "sender": _FixtureMsg(
+                            {"address": spec.get("from")
+                             or "user@fixture.invalid"}),
+                    })
+                    _sync_on_new_message(files_dir, acct,
+                                         types.SimpleNamespace(msg_id=mid))
+        except Exception as e:
+            log.warning("fixture inject failed: %s", e)
+        time.sleep(0.5)
+
+
 def run_sync_fixture(files_dir):
     """Offline SYNC-bridge fixture: runs the same watcher the live bot runs,
-    against a fixture control. Used by the on-device emulator gate."""
+    against a fixture control, with a synthetic Chat at the rpc boundary and
+    a FIXTURE_INJECT_*.json inbound injection loop driving the REAL capture
+    hook. Used by the on-device emulator gate; no account, no network, no
+    core, and no claim of relay delivery."""
+    import deltachat_rpc_client
+    deltachat_rpc_client.Chat = _FixtureChat
+    _FixtureChat._dir[0] = files_dir
     flag = os.path.join(files_dir, STOP_FLAG)
     try:
         os.unlink(flag)
     except FileNotFoundError:
         pass
+    acct = _FixtureAccount()
+    inj = threading.Thread(target=_fixture_inject_loop,
+                           args=(files_dir, acct, flag),
+                           daemon=True, name="bot-fixture-inject")
+    inj.start()
     _sync_watcher(files_dir, _FixtureControl(files_dir))
 
 

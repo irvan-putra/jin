@@ -45,8 +45,9 @@ adb shell am force-stop $JIN
 # never a silent queue.
 runprobe granted
 
-# Phase 4: the offline fixture bot serves the bridge: real pipes, real
-# drain/EOF ordering, visible failures at the accountless rpc boundary.
+# Phase 4: the offline fixture bot serves the bridge with the synthetic rpc
+# boundary DOWN: real pipes, real drain/EOF ordering, visible failures.
+adb shell run-as $JIN touch files/FIXTURE_RPC_DOWN
 adb shell am start -W -n $JIN/.MainActivity >/dev/null
 sleep 2
 adb shell am startservice -n $JIN/.BotService --es mode syncfixture
@@ -57,13 +58,52 @@ while [ $i -lt 120 ]; do
 done
 runprobe live
 
+# Phase 5: synthetic rpc boundary UP: success, dedup replay, refusal of
+# different-body reuse, status by ref, file retry via retained bytes.
+# Synthetic only - this is NOT relay delivery.
+adb shell run-as $JIN rm -f files/FIXTURE_RPC_DOWN
+runprobe live2
+FILEREF=$(adb shell run-as $PROBE cat files/probe-live2.log | grep "file-commit-ok" | grep -o "ref=m[0-9]*" | head -1 | cut -d= -f2)
+
+# Phase 6: simulate the stage-TTL sweep, then the documented recovery route:
+# bare retry -> EXPIRED, same-token re-stage of identical bytes -> original
+# ref, different bytes -> TOKEN_REUSED. Never a fresh token.
+adb shell run-as $JIN rm -f files/stage/probeV02_file.bin
+adb shell am force-stop $PROBE
+adb shell run-as $PROBE rm -f files/probe-swept.log 2>/dev/null || true
+adb shell am start -W -n $PROBE/.MainActivity --es scenario swept --es handle "$HANDLE" --es fileref "$FILEREF" >/dev/null
+i=0
+while [ $i -lt 120 ]; do
+  if adb shell run-as $PROBE cat files/probe-swept.log 2>/dev/null | grep -q "PROBE DONE"; then break; fi
+  sleep 2; i=$((i+1))
+done
+adb shell run-as $PROBE cat files/probe-swept.log
+
+# Phase 7: inbound capture through the REAL hook, driven by injected
+# synthetic messages: prefix isolation for this caller.
+printf '%s' '{"chat_id":11,"text":"/probe hello","msg_id":1001}' | adb shell run-as $JIN sh -c 'cat > files/FIXTURE_INJECT_a'
+printf '%s' '{"chat_id":11,"text":"/other x","msg_id":1002}' | adb shell run-as $JIN sh -c 'cat > files/FIXTURE_INJECT_b'
+printf '%s' '{"chat_id":11,"text":"no prefix at all","msg_id":1003}' | adb shell run-as $JIN sh -c 'cat > files/FIXTURE_INJECT_c'
+sleep 4
+runprobe inbound
+
+# Phase 8: retention overflow: an old cursor must see gap+first_available.
+printf '%s' '{"chat_id":11,"text":"/probe bulk","msg_id":2000,"fill":510}' | adb shell run-as $JIN sh -c 'cat > files/FIXTURE_INJECT_d'
+sleep 8
+runprobe gap
+
 # any probe FAIL line or nonzero failure count fails the job
-for s in ungranted granted live; do
+for s in ungranted granted live live2 swept inbound gap; do
   adb shell run-as $PROBE cat files/probe-$s.log > /tmp/probe-$s.log 2>/dev/null || true
 done
-if grep -h " FAIL " /tmp/probe-ungranted.log /tmp/probe-granted.log /tmp/probe-live.log; then
+# the dedup machinery must have sent each successful logical send ONCE
+SENDS=$(adb shell run-as $JIN cat files/fixture-sends.jsonl 2>/dev/null || true)
+echo "$SENDS"
+[ "$(echo "$SENDS" | grep -c '"text": "probe ok 1"')" = 1 ] || { echo "transport gate: duplicate send of probe ok 1" >&2; exit 1; }
+[ "$(echo "$SENDS" | grep -c '"text": "probe file ok"')" = 1 ] || { echo "transport gate: duplicate send of probe file ok" >&2; exit 1; }
+if grep -h " FAIL " /tmp/probe-*.log; then
   echo "transport gate: FAILURES above" >&2
   exit 1
 fi
-grep -h "PROBE DONE" /tmp/probe-ungranted.log /tmp/probe-granted.log /tmp/probe-live.log
+grep -h "PROBE DONE" /tmp/probe-*.log
 echo "transport gate: PASS"

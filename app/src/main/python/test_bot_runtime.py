@@ -1791,6 +1791,34 @@ def test_sync_send_dedup_replays_response():
         print("sync send dedup replay ok")
 
 
+def test_sync_fixture_send_and_inject():
+    import types
+    with tempfile.TemporaryDirectory() as d:
+        br._FixtureChat._dir[0] = d
+        ch = br._FixtureChat(None, 11)
+        m = ch.send_message(text="hi")
+        assert m.id > 9000
+        assert '"chat_id": 11' in open(os.path.join(d, "fixture-sends.jsonl")).read()
+        open(os.path.join(d, "FIXTURE_RPC_DOWN"), "w").close()
+        try:
+            ch.send_message(text="hi")
+            assert False, "expected RuntimeError"
+        except RuntimeError:
+            pass
+        h = _mk_handle("bot@nine.testrun.org", 11, 7)
+        _write_grants(d, {"com.x": {"enabled": True, "prefix": "/x",
+                                    "chats_send": [], "chats_recv": [h]}})
+        acct = br._FixtureAccount()
+        for mid, text in ((1, "/x hi"), (2, "/y no"), (3, "plain")):
+            acct._msgs[mid] = br._FixtureMsg({"chat_id": 11, "text": text,
+                "from_id": 2, "sender": br._FixtureMsg({"address": "u@x"})})
+            br._sync_on_new_message(d, acct, types.SimpleNamespace(msg_id=mid))
+        inbox = [json.loads(l)
+                 for l in open(os.path.join(d, br.SYNC_INBOX))]
+        assert len(inbox) == 1 and inbox[0]["text"] == "/x hi", inbox
+        print("sync fixture send/inject ok")
+
+
 if __name__ == "__main__":
     test_api_conformance()
     test_state_and_binding()
@@ -1844,6 +1872,7 @@ if __name__ == "__main__":
     test_sync_handle_roundtrip_and_garbage()
     test_sync_send_requires_grant_and_chat()
     test_sync_send_dedup_replays_response()
+    test_sync_fixture_send_and_inject()
     test_sync_poll_scopes_to_callers_chats()
     test_sync_list_chats_returns_granted_only()
     test_sync_poll_prefix_isolation_shared_chat()

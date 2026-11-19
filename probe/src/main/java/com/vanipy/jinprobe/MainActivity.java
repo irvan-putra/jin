@@ -38,6 +38,10 @@ public class MainActivity extends Activity {
                     case "ungranted": ungranted(); break;
                     case "granted": grantedBotDown(); break;
                     case "live": live(); break;
+                    case "live2": live2(); break;
+                    case "swept": swept(); break;
+                    case "inbound": inbound(); break;
+                    case "gap": gap(); break;
                     default: step("args", false, "unknown scenario " + scenario);
                 }
             } catch (Throwable t) {
@@ -74,11 +78,16 @@ public class MainActivity extends Activity {
 
     /** Streams size zero-ish bytes through a REAL content:// pipe. */
     private void streamFile(String token, long size) throws Exception {
+        streamFile(token, size, (byte) 0);
+    }
+
+    private void streamFile(String token, long size, byte fill) throws Exception {
         Bundle st = call("stage", token, null);
         Uri uri = Uri.parse(st.getString("uri"));
         ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(uri, "w");
         FileOutputStream out = new FileOutputStream(pfd.getFileDescriptor());
         byte[] chunk = new byte[262144];
+        java.util.Arrays.fill(chunk, fill);
         long left = size;
         try {
             while (left > 0) {
@@ -169,5 +178,76 @@ public class MainActivity extends Activity {
 
         Bundle s = call("status", "m1", null);
         step("status-unknown-ref", !s.getBoolean("ok"), s.getString("error"));
+    }
+
+    private void live2() throws Exception {
+        // synthetic Chat fixture: sends SUCCEED at the fake rpc boundary.
+        // This proves provider/bridge/dedup machinery on a real OS - NOT any
+        // relay delivery.
+        Bundle c1 = call("commit", "probeV01_text", meta(handle, "probe ok 1", false));
+        String ref = c1.getString("ref");
+        step("text-commit-ok", c1.getBoolean("ok") && ref != null && ref.startsWith("m"),
+                "ref=" + ref);
+        Bundle c2 = call("commit", "probeV01_text", meta(handle, "probe ok 1", false));
+        step("retry-replays-ref", c2.getBoolean("ok") && ref != null && ref.equals(c2.getString("ref")),
+                "ref=" + c2.getString("ref"));
+        Bundle c3 = call("commit", "probeV01_text", meta(handle, "DIFFERENT BODY", false));
+        step("different-body-rejected", !c3.getBoolean("ok")
+                && "TOKEN_REUSED".equals(c3.getString("error")), c3.getString("error"));
+        Bundle st = call("status", ref == null ? "m1" : ref, null);
+        step("status-by-ref", st.getBoolean("ok") && st.getString("status") != null,
+                st.getString("status"));
+
+        streamFile("probeV02_file", 1024 * 1024);
+        Bundle c4 = call("commit", "probeV02_file", meta(handle, "probe file ok", true));
+        step("file-commit-ok", c4.getBoolean("ok") && c4.getString("ref") != null,
+                "ref=" + c4.getString("ref"));
+        streamFile("probeV02_file", 1024 * 1024); // retained bytes re-verify
+        Bundle c5 = call("commit", "probeV02_file", meta(handle, "probe file ok", true));
+        step("file-retry-replays-ref", c5.getBoolean("ok")
+                && c5.getString("ref") != null && c5.getString("ref").equals(c4.getString("ref")),
+                "ref=" + c5.getString("ref"));
+    }
+
+    private void swept() throws Exception {
+        // CI deleted stage/probeV02_file.bin to simulate the TTL sweep.
+        String wantRef = getIntent().getStringExtra("fileref");
+        Bundle bare = call("commit", "probeV02_file", meta(handle, "probe file ok", true));
+        step("bare-retry-expired", !bare.getBoolean("ok")
+                && "EXPIRED".equals(bare.getString("error")), bare.getString("error"));
+        streamFile("probeV02_file", 1024 * 1024); // same bytes: recovery
+        Bundle rec = call("commit", "probeV02_file", meta(handle, "probe file ok", true));
+        step("restage-same-bytes-recovers", rec.getBoolean("ok")
+                && rec.getString("ref") != null && rec.getString("ref").equals(wantRef),
+                "ref=" + rec.getString("ref") + " want=" + wantRef);
+        streamFile("probeV02_file", 1024 * 1024, (byte) 7); // different bytes
+        Bundle bad = call("commit", "probeV02_file", meta(handle, "probe file ok", true));
+        step("restage-different-bytes-rejected", !bad.getBoolean("ok")
+                && "TOKEN_REUSED".equals(bad.getString("error")), bad.getString("error"));
+    }
+
+    private void inbound() throws Exception {
+        // CI injected 3 messages via FIXTURE_INJECT: one /probe, one /other,
+        // one prefix-less. Only the /probe one may reach this caller.
+        Bundle p1 = call("poll", "0", null);
+        org.json.JSONArray items = new org.json.JSONArray(p1.getString("items"));
+        boolean one = items.length() == 1
+                && items.getJSONObject(0).getString("text").startsWith("/probe");
+        step("poll-prefix-filtered", p1.getBoolean("ok") && one,
+                "items=" + items.length());
+        String cursor = p1.getString("cursor");
+        Bundle p2 = call("poll", cursor, null);
+        step("poll-cursor-advances", p2.getBoolean("ok")
+                && "[]".equals(p2.getString("items")) && !p2.getBoolean("gap", false),
+                "cursor=" + cursor);
+    }
+
+    private void gap() throws Exception {
+        // CI bulk-injected past the 500-item retention; an old cursor must
+        // see a visible gap with first_available, never a silent skip.
+        Bundle p = call("poll", "1", null);
+        step("poll-gap-visible", p.getBoolean("ok") && p.getBoolean("gap", false)
+                && p.getString("first_available") != null,
+                "first_available=" + p.getString("first_available"));
     }
 }
