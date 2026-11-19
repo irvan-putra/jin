@@ -68,6 +68,9 @@
             android:textColor="#D0D5DD" android:textSize="14sp" />
         <View android:layout_width="match_parent" android:layout_height="1dp"
             android:layout_marginTop="16dp" android:background="#344054" />
+        <TextView android:id="@+id/menuApps" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Connected apps" android:minHeight="48dp" android:gravity="center_vertical" android:focusable="true"
+            android:textColor="#D0D5DD" android:textSize="14sp" />
         <TextView android:id="@+id/menuExport" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:text="Export bot for itdapk" android:minHeight="48dp" android:gravity="center_vertical" android:focusable="true"
             android:textColor="#98A2B3" android:textSize="14sp" />
