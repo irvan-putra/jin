@@ -39,8 +39,8 @@ jobs:
       # SET: 64 hex digits (uppercase) of the key certificate, printed by the key generator. Not a secret.
       EXPECTED_CERT_SHA256: 5C16884E155B966454AA3C4DB0543632F7CDB3D0EA2D9265757C23731C29C9B9
       # SET per release: must equal app/build.gradle and the icon badge. Edit in the release commit.
-      EXPECTED_VERSION_NAME: '0.5.0'
-      EXPECTED_VERSION_CODE: '13'
+      EXPECTED_VERSION_NAME: '0.5.1'
+      EXPECTED_VERSION_CODE: '14'
       EXPECTED_PACKAGE: com.vanipy.jin
       EXPECTED_LABEL: jin
       BUILD_TOOLS_VERSION: 34.0.0
