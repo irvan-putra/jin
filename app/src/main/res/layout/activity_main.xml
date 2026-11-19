@@ -34,17 +34,17 @@
                 <Button android:id="@+id/primaryButton" android:layout_width="match_parent" android:layout_height="wrap_content"
                     android:layout_marginTop="16dp" android:minHeight="52dp" android:textAllCaps="false"
                     android:textSize="15sp" android:textStyle="bold"
-                    android:backgroundTint="#F59E0B" android:textColor="#101828" />
+                    android:background="@drawable/btn_square_amber" android:textColor="#101828" />
 
                 <Button android:id="@+id/publishButton" android:layout_width="match_parent" android:layout_height="wrap_content"
                     android:layout_marginTop="10dp" android:minHeight="48dp" android:textAllCaps="false"
                     android:text="Publish new app version (.xdc)"
-                    android:backgroundTint="#1D2939" android:textColor="#D0D5DD" />
+                    android:background="@drawable/btn_square_dark" android:textColor="#D0D5DD" />
 
                 <Button android:id="@+id/stopButton" android:layout_width="match_parent" android:layout_height="wrap_content"
                     android:layout_marginTop="10dp" android:minHeight="48dp" android:textAllCaps="false"
                     android:text="Stop bot"
-                    android:backgroundTint="#1D2939" android:textColor="#D0D5DD" />
+                    android:background="@drawable/btn_square_dark" android:textColor="#D0D5DD" />
 
                 <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
                     android:layout_marginTop="24dp" android:layout_marginBottom="20dp"
