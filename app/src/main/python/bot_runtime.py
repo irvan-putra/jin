@@ -1081,15 +1081,14 @@ def _sync_on_new_message(files_dir, account, event):
     if not handle:
         return
     text = snap.get("text") or ""
-    if snap.get("from_id") == account.get_self_contact().id:
+    if snap.get("from_id") == account.self_contact.id:
         return
     pfx = prefixes.get(handle) or {""}
     if pfx != {""} and not any(p and text.startswith(p) for p in pfx):
         return
     sender = ""
     try:
-        sender = account.get_contact_by_id(snap["from_id"]).get_snapshot() \
-            .get("address", "")
+        sender = snap["sender"].get_snapshot().get("address", "")
     except Exception:
         pass
     seq_path = os.path.join(files_dir, SYNC_INBOX_SEQ)
