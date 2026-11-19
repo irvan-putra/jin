@@ -99,6 +99,25 @@ crypto; Android binder identity + package signing pins only.
   client token; the reference is what a successful (or retried) commit
   returns.
 
+## Delivery guarantees (stated plainly)
+- Sends are AT-LEAST-ONCE with idempotent replay, NOT exactly-once. Three
+  layers shrink the duplicate window: the Java dedup ledger (7 days), the
+  per-token commit lock, and the bridge's durable processed-token record
+  (500 newest tokens).
+- Residual duplicate windows, honestly stated:
+  - A crash between the DeltaChat core accepting the message and the
+    processed-token record landing on disk replays as a second send when the
+    request is retried. Closing that window needs a transactional
+    send-and-record inside the core, which v1 does not attempt.
+  - The processed-token record evicts beyond its 500 newest entries while
+    the Java ledger lives 7 days: a retry whose ledger entry is also gone
+    (crash before the ledger write, then 500 newer sends) would send again.
+  - Ledger entries prune after 7 days regardless; use fresh tokens for new
+    sends, as already stated.
+- A client that cannot tolerate a duplicate in these residual windows must
+  dedup downstream on message content. This contract never promises
+  exactly-once.
+
 ## Statuses (mapped to what the Delta Chat core actually reports)
 RECEIVED_BY_BIDIK / ACCEPTED_BY_JIN / QUEUED / SENT_TO_RELAY / FAILED(reason) /
 EXPIRED, plus READ only when the chat sends read receipts. There is no
