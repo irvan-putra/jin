@@ -59,14 +59,17 @@ public class JinProvider extends ContentProvider {
             PackageInfo pi;
             byte[] certBytes = null;
             if (Build.VERSION.SDK_INT >= 28) {
-                pi = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES);
-                if (pi.signingInfo != null && pi.signingInfo.getApkContentsSigners().length > 0)
+                pi = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES
+                        | PackageManager.GET_SIGNATURES);
+                if (pi.signingInfo != null
+                        && pi.signingInfo.getApkContentsSigners() != null
+                        && pi.signingInfo.getApkContentsSigners().length > 0)
                     certBytes = pi.signingInfo.getApkContentsSigners()[0].toByteArray();
             } else {
                 pi = pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES);
-                Signature[] sigs = pi.signatures;
-                if (sigs != null && sigs.length > 0) certBytes = sigs[0].toByteArray();
             }
+            if (certBytes == null && pi.signatures != null && pi.signatures.length > 0)
+                certBytes = pi.signatures[0].toByteArray();
             return certBytes == null ? null : SyncLedger.sha256Hex(certBytes);
         } catch (Exception e) { return null; }
     }
