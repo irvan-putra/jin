@@ -3,7 +3,7 @@
     <queries>
         <provider android:authorities="com.vanipy.jin.transport" />
     </queries>
-    <application android:label="jinprobe" android:theme="@android:style/Theme.NoDisplay">
+    <application android:label="jinprobe" android:theme="@android:style/Theme.NoTitleBar">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

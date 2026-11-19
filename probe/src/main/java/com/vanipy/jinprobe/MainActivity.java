@@ -1,6 +1,7 @@
 package com.vanipy.jinprobe;
 
 import android.app.Activity;
+import android.util.Log;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
@@ -47,6 +48,7 @@ public class MainActivity extends Activity {
             } catch (Throwable t) {
                 step("crash", false, String.valueOf(t));
             }
+            Log.i("jinprobe", "PROBE DONE " + scenario + " failures=" + failures.get());
             try {
                 log.write("PROBE DONE " + scenario + " failures=" + failures.get() + "\n");
                 log.close();
@@ -61,8 +63,10 @@ public class MainActivity extends Activity {
 
     private void step(String name, boolean pass, String detail) {
         if (!pass) failures.incrementAndGet();
+        String line = "PROBE " + scenario + " " + name + " " + (pass ? "PASS " : "FAIL ") + detail;
+        Log.i("jinprobe", line);
         try {
-            log.write("PROBE " + scenario + " " + name + " " + (pass ? "PASS " : "FAIL ") + detail + "\n");
+            log.write(line + "\n");
             log.flush();
         } catch (Exception ignored) {}
     }
