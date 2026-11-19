@@ -153,6 +153,7 @@ public class JinProvider extends ContentProvider {
         File part = new File(stageDir, token + ".part");
         if (part.exists()) part.delete();
         new File(stageDir, token + ".overflow").delete();
+        new File(stageDir, token + ".done").delete();
         return ok();
     }
 
@@ -174,17 +175,36 @@ public class JinProvider extends ContentProvider {
             staged.delete();
             return err(TransportContract.E_BAD_TOKEN); // expired staging token
         }
+        // A caller can close() its pipe end and commit before the drain thread
+        // has consumed the final bytes: wait (bounded) for the drain's EOF
+        // marker so the hash never covers truncated bytes.
+        File done = new File(stageDir, token + ".done");
+        File overflow = new File(stageDir, token + ".overflow");
+        boolean wantsFile = !meta.optString("filename", "").isEmpty();
+        if (staged.exists() && !done.exists() && !overflow.exists()) {
+            long deadline = System.currentTimeMillis() + 5000;
+            while (System.currentTimeMillis() < deadline
+                    && !done.exists() && !overflow.exists()) {
+                try { Thread.sleep(100); } catch (InterruptedException ie) { break; }
+            }
+        }
         String fileSha = "";
         byte[] fileBytes = null;
+        if (overflow.exists()) {
+            staged.delete();
+            return err(TransportContract.E_FILE_TOO_LARGE);
+        }
         if (staged.exists()) {
-            if (new File(stageDir, token + ".overflow").exists()) {
+            if (!done.exists()) {
                 staged.delete();
-                return err(TransportContract.E_FILE_TOO_LARGE);
+                return err(TransportContract.E_STAGE_INCOMPLETE);
             }
             try {
                 fileBytes = readAll(staged);
                 fileSha = SyncLedger.sha256Hex(fileBytes);
             } catch (IOException e) { return err(TransportContract.E_MALFORMED); }
+        } else if (wantsFile) {
+            return err(TransportContract.E_STAGE_INCOMPLETE); // stream never arrived
         }
         // Canonical metadata: method + chat + text (+ filename/mime when a file is attached).
         String canon = "send|" + chat + "|" + meta.optString("text", "")
@@ -262,9 +282,18 @@ public class JinProvider extends ContentProvider {
         } catch (Exception e) { return err(TransportContract.E_MALFORMED); }
         JSONObject resp = awaitResp(id);
         if (resp == null) return err(TransportContract.E_BOT_NOT_RUNNING);
+        if (!resp.optBoolean("ok")) {
+            // propagate the runtime's failure: an error must never look like
+            // an empty result with a reset cursor
+            return err(resp.optString("error", TransportContract.E_MALFORMED));
+        }
         Bundle b = ok();
         b.putString(TransportContract.K_ITEMS, resp.optString("items", "[]"));
         b.putString(TransportContract.K_CURSOR, resp.optString("cursor", ""));
+        if (resp.optBoolean("gap")) {
+            b.putBoolean(TransportContract.K_GAP, true);
+            b.putString(TransportContract.K_FIRST_AVAILABLE, resp.optString("first_available", ""));
+        }
         return b;
     }
 
@@ -334,6 +363,7 @@ public class JinProvider extends ContentProvider {
                             out.write(buf, 0, n);
                         }
                         out.close(); in.close();
+                        new File(stageDir, token + ".done").createNewFile();
                     } catch (IOException e) {
                         part.delete();
                     }

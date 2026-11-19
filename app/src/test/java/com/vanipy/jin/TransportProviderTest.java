@@ -194,6 +194,173 @@ public class TransportProviderTest {
         assertEquals(TransportContract.E_FUTURE_TS, c.getString(TransportContract.K_ERROR));
     }
 
+    /** Watches for one SYNC_REQ_* and answers it with the canned payload. */
+    private Thread respondOnce(final String respJson) {
+        final java.io.File dir = RuntimeEnvironment.getApplication().getFilesDir();
+        Thread t = new Thread(new Runnable() {
+            @Override public void run() {
+                long deadline = System.currentTimeMillis() + 8000;
+                while (System.currentTimeMillis() < deadline) {
+                    String[] names = dir.list();
+                    if (names != null) {
+                        for (String n : names) {
+                            if (!n.startsWith("SYNC_REQ_")) continue;
+                            String id = n.substring("SYNC_REQ_".length());
+                            new java.io.File(dir, n).delete();
+                            try {
+                                java.io.File tmp = new java.io.File(dir, "SYNC_RESP_" + id + ".tmp");
+                                java.io.FileWriter w = new java.io.FileWriter(tmp);
+                                w.write(respJson);
+                                w.close();
+                                tmp.renameTo(new java.io.File(dir, "SYNC_RESP_" + id));
+                            } catch (Exception ignored) {}
+                            return;
+                        }
+                    }
+                    try { Thread.sleep(50); } catch (InterruptedException ie) { return; }
+                }
+            }
+        });
+        t.setDaemon(true);
+        t.start();
+        return t;
+    }
+
+    private void botAlive() throws Exception {
+        java.io.File f = new java.io.File(RuntimeEnvironment.getApplication().getFilesDir(), "SYNC_ALIVE");
+        java.io.FileWriter w = new java.io.FileWriter(f);
+        w.write("1");
+        w.close();
+    }
+
+    @Test
+    public void bridgePropagatesPythonError() throws Exception {
+        grants.setEnabled(PKG, CERT_A, true, "/x");
+        botAlive();
+        respondOnce("{\"ok\":false,\"error\":\"NOT_AUTHORIZED\"}");
+        Bundle r = call(provider, TransportContract.M_POLL, "0", null);
+        assertFalse(r.getBoolean(TransportContract.K_OK));
+        // an error must never masquerade as an empty page with a reset cursor
+        assertEquals(TransportContract.E_NOT_AUTHORIZED, r.getString(TransportContract.K_ERROR));
+    }
+
+    @Test
+    public void bridgePassesGapThrough() throws Exception {
+        grants.setEnabled(PKG, CERT_A, true, "/x");
+        botAlive();
+        respondOnce("{\"ok\":true,\"items\":\"[]\",\"cursor\":\"41\",\"gap\":true,\"first_available\":\"40\"}");
+        Bundle r = call(provider, TransportContract.M_POLL, "10", null);
+        assertTrue(r.getBoolean(TransportContract.K_OK));
+        assertEquals("41", r.getString(TransportContract.K_CURSOR));
+        assertTrue(r.getBoolean(TransportContract.K_GAP));
+        assertEquals("40", r.getString(TransportContract.K_FIRST_AVAILABLE));
+    }
+
+    private java.io.File stageFile(String token, String suffix, byte[] data) throws Exception {
+        java.io.File dir = new java.io.File(RuntimeEnvironment.getApplication().getFilesDir(), "stage");
+        dir.mkdirs();
+        java.io.File f = new java.io.File(dir, token + suffix);
+        java.io.FileOutputStream o = new java.io.FileOutputStream(f);
+        if (data != null) o.write(data);
+        o.close();
+        return f;
+    }
+
+    private Bundle commitWithFileMeta(String token, String handle) {
+        Bundle meta = new Bundle();
+        meta.putString(TransportContract.K_META, "{\"chat\":\"" + handle
+                + "\",\"text\":\"\",\"filename\":\"x.bin\",\"mime\":\"application/octet-stream\",\"ts\":"
+                + System.currentTimeMillis() + "}");
+        return call(provider, TransportContract.M_COMMIT, token, meta);
+    }
+
+    private void assertReqHasFullFile(String token, int len) throws Exception {
+        java.io.File dir = RuntimeEnvironment.getApplication().getFilesDir();
+        java.io.File req = new java.io.File(dir, "SYNC_REQ_" + token);
+        assertTrue(req.exists());
+        byte[] raw = new byte[(int) req.length()];
+        java.io.FileInputStream in = new java.io.FileInputStream(req);
+        int off = 0, n;
+        while (off < raw.length && (n = in.read(raw, off, raw.length - off)) > 0) off += n;
+        in.close();
+        String reqJson = new String(raw, 0, off, "UTF-8");
+        assertTrue(reqJson, reqJson.contains("\"file\":\"" + token + ".bin\""));
+        java.io.File bin = new java.io.File(dir, "stage/" + token + ".bin");
+        assertTrue(bin.exists());
+        assertEquals(len, bin.length());
+    }
+
+    @Test
+    public void commitAttachesCompletedStage() throws Exception {
+        // a finished drain (part + done marker) is consumed fully
+        grants.setEnabled(PKG, CERT_A, true, "/x");
+        String handle = "aGFuZGxl";
+        grants.setChatScope(PKG, handle, "send", true);
+        call(provider, TransportContract.M_STAGE, "tok_stream1", null);
+        byte[] payload = new byte[100000];
+        java.util.Arrays.fill(payload, (byte) 7);
+        stageFile("tok_stream1", ".part", payload);
+        stageFile("tok_stream1", ".done", null);
+        Bundle c = commitWithFileMeta("tok_stream1", handle);
+        assertEquals(TransportContract.E_BOT_NOT_RUNNING, c.getString(TransportContract.K_ERROR));
+        assertReqHasFullFile("tok_stream1", payload.length);
+    }
+
+    @Test
+    public void commitAwaitsLateDrainEof() throws Exception {
+        // part exists but the drain has not signalled EOF yet: commit waits
+        // (bounded) for the marker instead of hashing truncated bytes
+        grants.setEnabled(PKG, CERT_A, true, "/x");
+        String handle = "aGFuZGxl";
+        grants.setChatScope(PKG, handle, "send", true);
+        call(provider, TransportContract.M_STAGE, "tok_stream2", null);
+        final byte[] payload = new byte[100000];
+        java.util.Arrays.fill(payload, (byte) 9);
+        stageFile("tok_stream2", ".part", payload);
+        final Bundle[] holder = new Bundle[1];
+        Thread t = new Thread(new Runnable() {
+            @Override public void run() {
+                holder[0] = commitWithFileMeta("tok_stream2", handle);
+            }
+        });
+        t.start();
+        Thread.sleep(400);
+        assertTrue("commit must still be waiting for drain EOF", t.isAlive());
+        stageFile("tok_stream2", ".done", null);
+        t.join(6000);
+        assertFalse(t.isAlive());
+        assertEquals(TransportContract.E_BOT_NOT_RUNNING, holder[0].getString(TransportContract.K_ERROR));
+        assertReqHasFullFile("tok_stream2", payload.length);
+    }
+
+    @Test
+    public void commitAbortsWhenDrainNeverFinishes() throws Exception {
+        grants.setEnabled(PKG, CERT_A, true, "/x");
+        String handle = "aGFuZGxl";
+        grants.setChatScope(PKG, handle, "send", true);
+        call(provider, TransportContract.M_STAGE, "tok_stream3", null);
+        stageFile("tok_stream3", ".part", new byte[10]);
+        long t0 = System.currentTimeMillis();
+        Bundle c = commitWithFileMeta("tok_stream3", handle);
+        assertEquals(TransportContract.E_STAGE_INCOMPLETE, c.getString(TransportContract.K_ERROR));
+        assertTrue("bounded wait", System.currentTimeMillis() - t0 < 7000);
+        assertFalse(new java.io.File(RuntimeEnvironment.getApplication().getFilesDir(),
+                "SYNC_REQ_tok_stream3").exists());
+    }
+
+    @Test
+    public void commitWithoutStreamedFileFailsVisibly() {
+        grants.setEnabled(PKG, CERT_A, true, "/x");
+        String handle = "aGFuZGxl";
+        grants.setChatScope(PKG, handle, "send", true);
+        call(provider, TransportContract.M_STAGE, "tok_nofile1", null);
+        Bundle meta = new Bundle();
+        meta.putString(TransportContract.K_META, "{\"chat\":\"" + handle
+                + "\",\"filename\":\"x.bin\",\"ts\":" + System.currentTimeMillis() + "}");
+        Bundle c = call(provider, TransportContract.M_COMMIT, "tok_nofile1", meta);
+        assertEquals(TransportContract.E_STAGE_INCOMPLETE, c.getString(TransportContract.K_ERROR));
+    }
+
     @Test
     public void unknownMethodRejected() {
         grants.setEnabled(PKG, CERT_A, true, "/x");

@@ -4,3 +4,5 @@ build/
 *.apk
 *.keystore
 app/build/
+__pycache__/
+*.pyc

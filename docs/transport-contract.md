@@ -45,8 +45,11 @@ crypto; Android binder identity + package signing pins only.
   Apps with an empty prefix capture and receive nothing (fail closed).
 - Retention is bounded: Jin keeps the newest 500 captured items. If a caller's
   cursor is older than the oldest retained item, `poll` returns `gap: true`
-  with `first_available` so the caller can surface possibly-missed commands
-  instead of silently skipping them.
+  with `first_available` (Bundle keys `gap` / `first_available`) so the caller
+  can surface possibly-missed commands instead of silently skipping them.
+- Runtime failures propagate as errors, never as empty pages: a failed `poll`
+  returns `ok=false` with the error code and leaves the caller's cursor
+  semantics untouched.
 - While Jin's bot is not running, bridge calls fail visibly with
   BOT_NOT_RUNNING; sends do not queue for later, they error.
 
@@ -63,6 +66,10 @@ crypto; Android binder identity + package signing pins only.
 - A staged token expires after 10 minutes (enforced at stage, stream-open and
   commit; the runtime sweeps expired stage files). Client timestamps more than
   5 minutes in the future are rejected.
+- Commit/drain ordering is explicit: the drain signals EOF per token and
+  `commit` waits (bounded, 5 s) for that signal before hashing. A commit that
+  declares a file without a completed stream fails visibly with
+  STAGE_INCOMPLETE; truncated bytes are never hashed or sent.
 
 ## Dedup and hashing
 - Outbound dedup ledger binds: token + SHA-256 over the canonical metadata
