@@ -20,9 +20,44 @@ public class GrantsStore {
     private static final String K_SEEN = "seen";
 
     private final SharedPreferences prefs;
+    private final java.io.File mirror;
 
     public GrantsStore(Context ctx) {
         prefs = ctx.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        mirror = new java.io.File(ctx.getFilesDir(), "SYNC_GRANTS");
+    }
+
+    /** Mirror of the grants the python runtime enforces (defense in depth):
+     *  {pkg: {enabled, prefix, chats: [handle,...]}}. Written atomically. */
+    private void writeMirror() {
+        try {
+            JSONObject root = new JSONObject();
+            for (String key : prefs.getAll().keySet()) {
+                if (!key.startsWith("grant.")) continue;
+                String pkg = key.substring("grant.".length());
+                JSONObject g = grantJson(pkg);
+                if (g == null) continue;
+                JSONObject out = new JSONObject();
+                out.put("enabled", g.optBoolean("enabled"));
+                out.put("prefix", g.optString("prefix", ""));
+                JSONArray chats = new JSONArray();
+                JSONObject cj = g.optJSONObject("chats");
+                if (cj != null) {
+                    Iterator<String> it = cj.keys();
+                    while (it.hasNext()) {
+                        String h = it.next();
+                        if (cj.optBoolean(h)) chats.put(h);
+                    }
+                }
+                out.put("chats", chats);
+                root.put(pkg, out);
+            }
+            java.io.File tmp = new java.io.File(mirror.getParentFile(), "SYNC_GRANTS.tmp");
+            java.io.FileWriter w = new java.io.FileWriter(tmp);
+            w.write(root.toString());
+            w.close();
+            if (!tmp.renameTo(mirror)) tmp.delete();
+        } catch (Exception ignored) {}
     }
 
     public static final class SeenApp {
@@ -122,6 +157,7 @@ public class GrantsStore {
             if (!g.has("chats")) g.put("chats", new JSONObject());
             prefs.edit().putString("grant." + pkg, g.toString()).apply();
         } catch (JSONException ignored) {}
+        writeMirror();
     }
 
     public synchronized void setChatGranted(String pkg, String handle, boolean granted) {
@@ -134,5 +170,6 @@ public class GrantsStore {
             g.put("chats", chats).put("updated", System.currentTimeMillis());
             prefs.edit().putString("grant." + pkg, g.toString()).apply();
         } catch (JSONException ignored) {}
+        writeMirror();
     }
 }

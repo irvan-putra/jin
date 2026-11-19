@@ -107,8 +107,8 @@ public class JinProvider extends ContentProvider {
             case TransportContract.M_STAGE: return stage(arg);
             case TransportContract.M_CANCEL: return cancelStage(arg);
             case TransportContract.M_COMMIT: return commit(pkg, arg, extras);
-            case TransportContract.M_LIST_CHATS: return bridge("listChats", null);
-            case TransportContract.M_POLL: return bridge("poll", arg);
+            case TransportContract.M_LIST_CHATS: return bridge("listChats", null, pkg);
+            case TransportContract.M_POLL: return bridge("poll", arg, pkg);
             case TransportContract.M_STATUS: {
                 if (arg == null) return err(TransportContract.E_MALFORMED);
                 JSONObject st = ledger.statusOf(getContext(), arg);
@@ -133,9 +133,16 @@ public class JinProvider extends ContentProvider {
         } catch (SyncLedger.ReuseException e) {
             return err(TransportContract.E_TOKEN_REUSED);
         }
+        getContext().getSharedPreferences("transport_stage", 0).edit()
+            .putLong("ts." + token, System.currentTimeMillis()).apply();
         Bundle b = ok();
         b.putString(TransportContract.K_URI, "content://" + TransportContract.AUTHORITY + "/stage/" + token);
         return b;
+    }
+
+    private boolean stageTokenLive(String token) {
+        long ts = getContext().getSharedPreferences("transport_stage", 0).getLong("ts." + token, 0);
+        return ts > 0 && System.currentTimeMillis() - ts <= TransportContract.STAGE_TOKEN_TTL_MS;
     }
 
     private Bundle cancelStage(String token) {
@@ -160,6 +167,10 @@ public class JinProvider extends ContentProvider {
         if (!grants.isChatGranted(pkg, chat)) return err(TransportContract.E_CHAT_NOT_GRANTED);
 
         File staged = new File(stageDir, token + ".part");
+        if (staged.exists() && !stageTokenLive(token)) {
+            staged.delete();
+            return err(TransportContract.E_BAD_TOKEN); // expired staging token
+        }
         String fileSha = "";
         byte[] fileBytes = null;
         if (staged.exists()) {
@@ -228,12 +239,15 @@ public class JinProvider extends ContentProvider {
         return err(resp.optString("error", TransportContract.E_MALFORMED));
     }
 
-    private Bundle bridge(String method, String cursor) {
+    private Bundle bridge(String method, String cursor) { return bridge(method, cursor, null); }
+
+    private Bundle bridge(String method, String cursor, String pkg) {
         String id = "br" + System.currentTimeMillis() + "_" + (int) (Math.random() * 1e6);
         try {
             JSONObject req = new JSONObject();
             req.put("id", id).put("method", method);
             if (cursor != null) req.put("cursor", cursor);
+            if (pkg != null) req.put("pkg", pkg);
             File tmp = new File(getContext().getFilesDir(), "SYNC_REQ_" + id + ".tmp");
             FileWriter w = new FileWriter(tmp);
             w.write(req.toString());
@@ -291,7 +305,7 @@ public class JinProvider extends ContentProvider {
         if (!grants.isAuthorized(pkg, cert)) return null;
         if (uri.getPathSegments().size() != 2 || !"stage".equals(uri.getPathSegments().get(0))) return null;
         final String token = uri.getPathSegments().get(1);
-        if (!validToken(token)) return null;
+        if (!validToken(token) || !stageTokenLive(token)) return null;
         try {
             final ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
             final File part = new File(stageDir, token + ".part");
