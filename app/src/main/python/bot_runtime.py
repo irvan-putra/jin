@@ -1671,6 +1671,11 @@ def service_entry(native_lib_dir, files_dir, mode):
                 raise RuntimeError("implausible Bidik address refused: %r" % addr[:80])
             save_state(files_dir, bidik_peer_addr=addr)
             log.info("PAIRBIDIK DONE peer=%s", addr)
+        elif mode == "liveroute":
+            # CI-only live capture-route proof; see live_relay.py and
+            # tools/live-relay-route.sh.
+            import live_relay
+            live_relay.configure_then_run(native_lib_dir, files_dir)
         elif mode == "selfecho":
             # CI-only live-relay sign-in proof; see live_relay.py.
             import live_relay

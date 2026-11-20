@@ -97,3 +97,40 @@ def run(native_lib_dir, files_dir):
             json.dump({"status": status, "detail": detail}, f)
     if status != "ok":
         raise RuntimeError("live relay selfecho failed: " + detail)
+
+
+def configure_then_run(native_lib_dir, files_dir):
+    """Live capture-route proof (service mode 'liveroute').
+
+    Signs the vendored core into an EXISTING relay account (credentials
+    from files_dir/live_login.json, deleted immediately after use), marks
+    the profile provisioned with that address, then hands over to the
+    normal live loop. The paired peer and the requester pin are seeded by
+    the workflow; synthetic test traffic only.
+    """
+    import bot_runtime
+    cred_path = os.path.join(files_dir, "live_login.json")
+    with open(cred_path) as f:
+        creds = json.load(f)
+    addr = creds["addr"]
+    uri = "dclogin:" + addr + "?" + urllib.parse.urlencode(
+        {"p": creds["mail_pw"], "v": "1"})
+    rpc, dc = _rpc(native_lib_dir, files_dir)
+    try:
+        acct = dc.add_account()
+        acct.init_transports(uri)
+        if not acct.is_configured():
+            raise RuntimeError("dclogin transport did not configure")
+        actual = bot_runtime._account_addr(acct)
+        if actual != addr:
+            raise RuntimeError("configured transport address mismatch")
+    finally:
+        rpc.close()
+        try:
+            os.remove(cred_path)
+        except OSError:
+            pass
+    st = bot_runtime.load_state(files_dir)
+    bot_runtime.save_state(files_dir, provisioned=True, bot_addr=addr,
+                           acct_gen=st.get("acct_gen") or int(time.time()))
+    bot_runtime.run(native_lib_dir, files_dir)
