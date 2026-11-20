@@ -148,33 +148,57 @@ class RouteTable:
 # forwarded ONLY while it matches the pinned context (same page, declared
 # filename, not already forwarded) - a stale "last route" cannot misroute
 # an image to another requester, across interleaved queues or a restart.
-FILE_ROUTE_KEY = "capture_file_route"
+FILE_ROUTE_KEY = "capture_file_routes"
+_MAX_PINS = 8
 
 
 def _pin_file_route(state, queue_id, chat_id, result):
-    expected = [str(x) for x in (result.get("captures") or [])][:MAX_PAGES * 4]
-    state[FILE_ROUTE_KEY] = {
+    pins = state.setdefault(FILE_ROUTE_KEY, [])
+    pins.append({
         "queue_id": queue_id,
         "chat_id": chat_id,
         "page_id": result.get("page_id") or result.get("id") or "",
-        "expected": expected,
+        "expected": [str(x) for x in (result.get("captures") or [])][:MAX_PAGES * 4],
         "received": [],
-    }
+    })
+    del pins[:-_MAX_PINS]
+
+
+def _pin_complete(pin):
+    expected = pin.get("expected") or []
+    return bool(expected) and all(n in pin.get("received", []) for n in expected)
 
 
 def _file_target(state, page, name):
-    ctx = state.get(FILE_ROUTE_KEY)
-    if not ctx:
+    pins = state.get(FILE_ROUTE_KEY) or []
+    matches = [p for p in pins
+               if p.get("page_id") == page and not _pin_complete(p)]
+    if len(matches) != 1:
+        # none pending, or the same page_id in flight for two queues:
+        # refuse - never guess a route from ambiguous metadata
         return None
-    if page != ctx.get("page_id"):
-        return None
-    if name in ctx.get("received", []):
+    pin = matches[0]
+    if name in pin.get("received", []):
         return None  # duplicate delivery of the same file
-    expected = ctx.get("expected") or []
+    expected = pin.get("expected") or []
     if expected and name not in expected:
         return None  # undeclared filename: refuse, never guess a route
-    ctx.setdefault("received", []).append(name)
-    return ctx["chat_id"]
+    pin.setdefault("received", []).append(name)
+    return pin["chat_id"]
+
+
+def _summary_target(state):
+    """A bare run summary carries no queue or page metadata at all. It may
+    reach a requester only when every pending pin (and otherwise every
+    route) points at ONE chat; with interleaved runs it is dropped."""
+    pins = state.get(FILE_ROUTE_KEY) or []
+    targets = {p.get("chat_id") for p in pins}
+    if len(targets) == 1:
+        return next(iter(targets))
+    if pins:
+        return None
+    routes = set((state.get(RouteTable.KEY) or {}).values())
+    return next(iter(routes)) if len(routes) == 1 else None
 
 
 def handle_incoming(state, sender_addr, chat_id, text, is_served):
@@ -219,9 +243,8 @@ def handle_incoming(state, sender_addr, chat_id, text, is_served):
             return actions  # unpinned/undeclared/duplicate: refused
         # Plain text from the peer (run summary) forwards only while a
         # route is pending - pairing chatter must not leak into chats.
-        if text and state.get(RouteTable.KEY):
-            ctx = state.get(FILE_ROUTE_KEY)
-            target = ctx.get("chat_id") if ctx else None
+        if text:
+            target = _summary_target(state)
             if target is not None:
                 actions.append({"action": "forward_status", "chat_id": target,
                                 "text": "summary: " + text[:500]})
@@ -245,3 +268,13 @@ def handle_incoming(state, sender_addr, chat_id, text, is_served):
                     "text": "queued %s: %d page%s -> Bidik" % (
                         doc["queue_id"], len(urls), "" if len(urls) == 1 else "s")})
     return actions
+
+
+_ADDR_RE = re.compile(r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$")
+
+
+def is_plausible_addr(addr):
+    """Loose email-shape check for a paired peer address entered at setup.
+    The live pairing still proves the address through DeltaChat itself;
+    this only stops typos from poisoning state."""
+    return bool(addr) and bool(_ADDR_RE.match(addr.strip().lower()))

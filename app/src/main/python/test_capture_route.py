@@ -136,21 +136,49 @@ class HandlerTest(unittest.TestCase):
         self.assertEqual(f, [{"action": "forward_file", "chat_id": 7,
                               "caption": "capture-result-file:p1:a.png"}])
 
-    def test_interleaved_queues_cannot_cross_files(self):
+    def test_interleaved_same_page_id_refuses_both_sides(self):
+        # Captions carry no queue_id, so two queues in flight with the
+        # SAME page_id make a file untellable at the metadata level:
+        # BOTH sides are refused rather than one image misrouted.
         st = {"bidik_peer_addr": self.PEER}
         q1 = self._queue(st, chat_id=7)
         q2 = self._queue(st, chat_id=8, url="https://other.example/")
-        # q1 result pins chat 7 / page p1 / a.png
-        cr.handle_incoming(st, self.PEER, 99, self._result(q1, "p1", ["a.png"]), False)
-        # q2 result for the SAME generic page id re-pins to chat 8
-        cr.handle_incoming(st, self.PEER, 99, self._result(q2, "p1", ["b.png"]), False)
-        # q1's late file now mismatches the pin: refused, never to chat 7 or 8
+        cr.handle_incoming(st, self.PEER, 99, self._result(q1, "p1", ["shot.png"]), False)
+        cr.handle_incoming(st, self.PEER, 99, self._result(q2, "p1", ["shot.png"]), False)
         self.assertEqual(cr.handle_incoming(st, self.PEER, 99,
-                                            "capture-result-file:p1:a.png", False), [])
-        # q2's declared file goes to chat 8
-        f = cr.handle_incoming(st, self.PEER, 99,
-                               "capture-result-file:p1:b.png", False)
-        self.assertEqual(f[0]["chat_id"], 8)
+                                            "capture-result-file:p1:shot.png", False), [])
+
+    def test_interleaved_distinct_pages_route_independently(self):
+        st = {"bidik_peer_addr": self.PEER}
+        q1 = self._queue(st, chat_id=7)
+        q2 = self._queue(st, chat_id=8, url="https://other.example/")
+        cr.handle_incoming(st, self.PEER, 99, self._result(q1, "p1", ["a.png"]), False)
+        cr.handle_incoming(st, self.PEER, 99, self._result(q2, "p2", ["b.png"]), False)
+        f1 = cr.handle_incoming(st, self.PEER, 99,
+                                "capture-result-file:p1:a.png", False)
+        f2 = cr.handle_incoming(st, self.PEER, 99,
+                                "capture-result-file:p2:b.png", False)
+        self.assertEqual(f1[0]["chat_id"], 7)
+        self.assertEqual(f2[0]["chat_id"], 8)
+
+    def test_summary_dropped_when_requesters_interleave(self):
+        st = {"bidik_peer_addr": self.PEER}
+        q1 = self._queue(st, chat_id=7)
+        q2 = self._queue(st, chat_id=8, url="https://other.example/")
+        cr.handle_incoming(st, self.PEER, 99, self._result(q1, "p1", ["a.png"]), False)
+        cr.handle_incoming(st, self.PEER, 99, self._result(q2, "p2", ["b.png"]), False)
+        # two live pins, two chats: a bare summary cannot be attributed
+        self.assertEqual(cr.handle_incoming(st, self.PEER, 99, "run done", False), [])
+
+    def test_summary_routes_to_single_requester_after_completion(self):
+        st = {"bidik_peer_addr": self.PEER}
+        qid = self._queue(st)
+        cr.handle_incoming(st, self.PEER, 99, self._result(qid, "p1", ["a.png"]), False)
+        cr.handle_incoming(st, self.PEER, 99,
+                           "capture-result-file:p1:a.png", False)
+        acts = cr.handle_incoming(st, self.PEER, 99, "run done", False)
+        self.assertEqual(acts, [{"action": "forward_status", "chat_id": 7,
+                                 "text": "summary: run done"}])
 
     def test_undeclared_filename_refused(self):
         st = {"bidik_peer_addr": self.PEER}
@@ -210,3 +238,14 @@ class HandlerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AddrValidationTest(unittest.TestCase):
+    def test_plausible(self):
+        self.assertTrue(cr.is_plausible_addr("dwx9o9esj@nine.testrun.org"))
+        self.assertTrue(cr.is_plausible_addr("Bidik@X.Example"))
+        self.assertFalse(cr.is_plausible_addr(""))
+        self.assertFalse(cr.is_plausible_addr(None))
+        self.assertFalse(cr.is_plausible_addr("not-an-address"))
+        self.assertFalse(cr.is_plausible_addr("a@b"))
+        self.assertFalse(cr.is_plausible_addr("a@b c@d"))
