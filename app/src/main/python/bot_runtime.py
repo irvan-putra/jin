@@ -1530,6 +1530,19 @@ def service_entry(native_lib_dir, files_dir, mode):
             run(native_lib_dir, files_dir)
         elif mode == "syncfixture":
             run_sync_fixture(files_dir)
+        elif mode == "pairbidik":
+            # Owner-only setup (app-private request file written by the
+            # UI): store the paired Bidik peer address in state. Never a
+            # chat command - a served-chat user must not redirect captures.
+            import capture_route
+            req = os.path.join(files_dir, "PAIR_BIDIK_REQ")
+            with open(req) as f:
+                addr = f.read().strip().lower()
+            os.remove(req)
+            if not capture_route.is_plausible_addr(addr):
+                raise RuntimeError("implausible Bidik address refused: %r" % addr[:80])
+            save_state(files_dir, bidik_peer_addr=addr)
+            log.info("PAIRBIDIK DONE peer=%s", addr)
         elif mode == "selfecho":
             # CI-only live-relay sign-in proof; see live_relay.py.
             import live_relay

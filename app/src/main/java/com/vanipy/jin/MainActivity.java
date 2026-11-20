@@ -73,6 +73,10 @@ public class MainActivity extends Activity {
         });
         findViewById(R.id.menuLogs).setOnClickListener(v -> showLogs());
         findViewById(R.id.menuApps).setOnClickListener(v -> showConnectedApps());
+        findViewById(R.id.menuPairBidik).setOnClickListener(v -> {
+            drawer.closeDrawer(GravityCompat.START);
+            showPairBidikDialog();
+        });
         findViewById(R.id.menuExport).setOnClickListener(v -> {
             drawer.closeDrawer(GravityCompat.START);
             startExportFlow();
@@ -346,6 +350,38 @@ public class MainActivity extends Activity {
             return;
         }
         super.onBackPressed();
+    }
+
+    // Owner-only pairing for the capture route: the address never arrives
+    // via chat (a served-chat user must not redirect captures). The python
+    // side validates the shape before it lands in state.
+    private void showPairBidikDialog() {
+        final android.widget.EditText input = new android.widget.EditText(this);
+        input.setHint("bidik-address@relay.example");
+        input.setInputType(android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
+        int pad = (int) (20 * getResources().getDisplayMetrics().density);
+        android.widget.FrameLayout box = new android.widget.FrameLayout(this);
+        box.setPadding(pad, pad / 2, pad, 0);
+        box.addView(input);
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("Pair Bidik capture device")
+            .setMessage("DeltaChat address of the Bidik device that will answer capture requests from this bot's chats.")
+            .setView(box)
+            .setPositiveButton("Pair", (d, w) -> {
+                String addr = input.getText().toString().trim();
+                if (addr.isEmpty()) return;
+                try {
+                    java.io.FileWriter fw = new java.io.FileWriter(new java.io.File(getFilesDir(), "PAIR_BIDIK_REQ"));
+                    fw.write(addr);
+                    fw.close();
+                    startMode("pairbidik");
+                    Toast.makeText(this, "Pairing address sent - see View logs", Toast.LENGTH_LONG).show();
+                } catch (java.io.IOException e) {
+                    Toast.makeText(this, "Could not write pairing request", Toast.LENGTH_LONG).show();
+                }
+            })
+            .setNegativeButton("Cancel", null)
+            .show();
     }
 
     private void startMode(String mode) {
