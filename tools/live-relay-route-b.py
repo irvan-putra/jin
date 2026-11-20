@@ -108,7 +108,12 @@ def main():
             check=False)
         if not qr:
             raise RuntimeError("invite QR file was empty")
-        acct.secure_join(qr)
+        # Use the chat RETURNED by secure_join: it is bound to the
+        # contact that holds A's key. create_contact(A).create_chat() can
+        # bind a keyless shadow contact when the address form differs,
+        # and the second live run died exactly there ("e2e encryption
+        # unavailable") while handshake messages to A encrypted fine.
+        chat = acct.secure_join(qr)
         joined = []
         waiter = threading.Thread(
             target=lambda: (acct.wait_for_securejoin_joiner_success(),
@@ -118,11 +123,17 @@ def main():
         if not joined:
             raise RuntimeError("securejoin handshake did not finish in 240s")
         print("live route: securejoin handshake complete (B holds A key)")
-        chat = acct.create_contact(A).create_chat()
 
         # 2. hello: creates normal traffic in the fresh chat; consumed by
         #    the peer branch with no pins (no action taken by the bot).
-        chat.send_text("hello live route")
+        #    One bounded settle-retry separates a key-visibility race
+        #    from a hard chat/contact identity defect.
+        try:
+            chat.send_text("hello live route")
+        except Exception:
+            time.sleep(20)
+            chat = acct.create_contact(A).create_chat()
+            chat.send_text("hello live route")
         time.sleep(20)
 
         # 3. pin the route into A's state (chat id discovered from A's db)
