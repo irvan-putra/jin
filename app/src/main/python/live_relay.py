@@ -36,6 +36,7 @@ def run(native_lib_dir, files_dir):
         with open(cred_path) as f:
             creds = json.load(f)
         addr = creds["addr"]
+        token = creds.get("token") or ("live-echo-%d" % started)
         uri = "dclogin:" + addr + "?" + urllib.parse.urlencode(
             {"p": creds["mail_pw"], "v": "1"})
         rpc, dc = _rpc(native_lib_dir, files_dir)
@@ -48,14 +49,26 @@ def run(native_lib_dir, files_dir):
             if t.get("addr") != addr:
                 raise RuntimeError("configured transport address mismatch")
             acct.start_io()
-            token = "live-echo-%d" % started
             chat = acct.create_contact(addr).create_chat()
-            chat.send_text(token)
-            ev = acct.wait_for_incoming_msg_event(timeout=120)
-            if ev is None:
-                raise RuntimeError("no incoming echo within 120s")
+            msg = chat.send_text(token)
+            # Send path proof: the core accepted the message and SMTP
+            # delivery marks its state. Same-device IMAP dedup means the
+            # echo may never surface here as fresh; the relay round trip is
+            # witnessed by a second core instance of the SAME account on the
+            # runner (multi-device sync), see tools/live-relay-smoke.sh.
+            state = ""
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                state = str(msg.get_snapshot().get("state", "")).upper()
+                if "DELIVERED" in state or "MDN" in state or "SEEN" in state:
+                    break
+                if "FAILED" in state:
+                    raise RuntimeError("sent message state FAILED")
+                time.sleep(3)
+            if not ("DELIVERED" in state or "MDN" in state or "SEEN" in state):
+                raise RuntimeError("sent message did not reach delivered state (last: %r)" % state)
             status = "ok"
-            detail = "round_trip_s=%d" % (time.time() - started)
+            detail = "sent_state=%s send_s=%d" % (state, time.time() - started)
         finally:
             rpc.close()
     except Exception as e:
