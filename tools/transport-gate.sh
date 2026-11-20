@@ -112,8 +112,13 @@ printf '%s' 'bidik-fixture@fixture.invalid' | adb shell "run-as $JIN sh -c 'cat 
 # startservice is refused; bring it forward (wake + relaunch) and retry.
 startsvc() { # $1 = service mode
   adb shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+  adb shell wm dismiss-keyguard >/dev/null 2>&1 || true
   adb shell am start -W -n $JIN/.MainActivity >/dev/null
-  sleep 2
+  j=0
+  while [ $j -lt 15 ]; do
+    if adb shell dumpsys activity activities 2>/dev/null | grep "ResumedActivity" | grep -q "$JIN/.MainActivity"; then break; fi
+    sleep 1; j=$((j+1))
+  done
   adb shell am startservice -n $JIN/.BotService --es mode "$1"
 }
 i=0
