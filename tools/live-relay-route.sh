@@ -30,9 +30,15 @@ adb shell am force-stop $JIN
 adb shell am start -W -n $JIN/.MainActivity >/dev/null
 sleep 2
 adb shell am startservice -n $JIN/.BotService --es mode pairbidik
-sleep 4
-adb shell run-as $JIN cat files/bot_state.json | grep -q bidik_peer_addr \
-  || { echo "live route: pairing not stored" >&2; exit 1; }
+i=0
+until adb shell run-as $JIN cat files/bot_state.json 2>/dev/null | grep -q bidik_peer_addr; do
+  sleep 3; i=$((i+1))
+  if [ $i -ge 30 ]; then
+    echo "live route: pairing not stored within 90s" >&2
+    adb shell run-as $JIN tail -30 files/bot.log >&2 || true
+    exit 1
+  fi
+done
 adb shell am startservice -n $JIN/.BotService --es mode liveroute
 
 i=0

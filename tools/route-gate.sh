@@ -21,9 +21,15 @@ printf '%s' 'bidik-fixture@fixture.invalid' | adb shell "run-as $JIN sh -c 'mkdi
 adb shell am start -W -n $JIN/.MainActivity >/dev/null
 sleep 2
 adb shell am startservice -n $JIN/.BotService --es mode pairbidik
-sleep 4
-adb shell run-as $JIN cat files/bot_state.json | grep -q "bidik-fixture@fixture.invalid" || {
-  echo "route gate: pairbidik did not store the peer" >&2; exit 1; }
+i=0
+until adb shell run-as $JIN cat files/bot_state.json 2>/dev/null | grep -q "bidik-fixture@fixture.invalid"; do
+  sleep 3; i=$((i+1))
+  if [ $i -ge 30 ]; then
+    echo "route gate: pairbidik did not store the peer within 90s" >&2
+    adb shell run-as $JIN tail -30 files/bot.log >&2 || true
+    exit 1
+  fi
+done
 echo "route gate: pairing stored"
 adb shell am startservice -n $JIN/.BotService --es mode routefixture
 sleep 2
