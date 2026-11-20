@@ -1583,6 +1583,265 @@ def test_app_publish_adoption_ingest_failure_still_replays():
     print("ingest failure -> replay continues, ingest queued ok")
 
 
+
+# ------------------------------------------------------- sync transport
+class _StubControl:
+    """Minimal ChatControl stand-in for the sync bridge (no rpc client)."""
+    def __init__(self, files_dir, addr="bot@nine.testrun.org", served=(11, 12), gen=7):
+        self.files_dir = files_dir
+        self.bot_addr = addr
+        self.account = None
+        self._served = set(served)
+        self._gen = gen
+    def _st(self):
+        return {"acct_gen": self._gen, "chats": {str(c): {} for c in self._served}}
+    def _served_chat_ids(self):
+        return set(self._served)
+
+
+def _mk_handle(addr, cid, gen):
+    import base64
+    raw = "%s|%d|g%s" % (addr, cid, gen)
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _write_grants(files_dir, obj):
+    with open(os.path.join(files_dir, br.SYNC_GRANTS), "w") as f:
+        json.dump(obj, f)
+
+
+def test_sync_handle_roundtrip_and_garbage():
+    h = _mk_handle("bot@nine.testrun.org", 42, 7)
+    addr, cid, gen = br._sync_decode_handle(h)
+    assert addr == "bot@nine.testrun.org" and cid == 42 and gen == "g7"
+    assert br._sync_decode_handle("!!!") == (None, None, None)
+    assert br._sync_decode_handle("") == (None, None, None)
+    print("sync handle roundtrip ok")
+
+
+def test_sync_send_requires_grant_and_chat():
+    with tempfile.TemporaryDirectory() as d:
+        ctl = _StubControl(d)
+        h = _mk_handle(ctl.bot_addr, 11, 7)
+        # no grants file at all -> NOT_AUTHORIZED
+        r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": h, "text": "hi"})
+        assert r == {"ok": False, "error": "NOT_AUTHORIZED"}, r
+        # grant enabled but chat not listed -> CHAT_NOT_GRANTED
+        _write_grants(d, {"com.x": {"enabled": True, "prefix": "/x",
+                                    "chats_send": [], "chats_recv": []}})
+        r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": h, "text": "hi"})
+        assert r == {"ok": False, "error": "CHAT_NOT_GRANTED"}, r
+        # recv-only scope does NOT authorize sending
+        _write_grants(d, {"com.x": {"enabled": True, "prefix": "/x",
+                                    "chats_send": [], "chats_recv": [h]}})
+        r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": h, "text": "hi"})
+        assert r == {"ok": False, "error": "CHAT_NOT_GRANTED"}, r
+        # chat granted but disabled grant -> NOT_AUTHORIZED
+        _write_grants(d, {"com.x": {"enabled": False, "prefix": "/x",
+                                    "chats_send": [h], "chats_recv": []}})
+        r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": h, "text": "hi"})
+        assert r == {"ok": False, "error": "NOT_AUTHORIZED"}, r
+        # granted chat but handle from another account/generation -> MALFORMED
+        other = _mk_handle("other@relay.example", 11, 7)
+        old_gen = _mk_handle(ctl.bot_addr, 11, 6)
+        _write_grants(d, {"com.x": {"enabled": True, "prefix": "/x",
+                                    "chats_send": [other, old_gen],
+                                    "chats_recv": []}})
+        r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": other, "text": "hi"})
+        assert r == {"ok": False, "error": "MALFORMED"}, r
+        r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": old_gen, "text": "hi"})
+        assert r == {"ok": False, "error": "MALFORMED"}, r
+        # unserved (revoked/unknown) chat id -> MALFORMED
+        unserved = _mk_handle(ctl.bot_addr, 99, 7)
+        _write_grants(d, {"com.x": {"enabled": True, "prefix": "/x",
+                                    "chats_send": [unserved], "chats_recv": []}})
+        r = br._sync_send(d, ctl, {"pkg": "com.x", "chat": unserved, "text": "hi"})
+        assert r == {"ok": False, "error": "MALFORMED"}, r
+    print("sync send grant gates ok")
+
+
+def test_sync_poll_scopes_to_callers_chats():
+    with tempfile.TemporaryDirectory() as d:
+        h_a = _mk_handle("bot@nine.testrun.org", 11, 7)
+        h_b = _mk_handle("bot@nine.testrun.org", 12, 7)
+        _write_grants(d, {
+            "com.a": {"enabled": True, "prefix": "/a",
+                      "chats_send": [], "chats_recv": [h_a]},
+            "com.b": {"enabled": True, "prefix": "/b",
+                      "chats_send": [], "chats_recv": [h_b]},
+        })
+        with open(os.path.join(d, br.SYNC_INBOX), "w") as f:
+            for seq, h, txt in [(1, h_a, "/a hi"), (2, h_b, "/b yo"), (3, h_a, "/a again")]:
+                f.write(json.dumps({"seq": seq, "ts": 1, "chat": h,
+                                    "from": "u@x", "text": txt}) + "\n")
+        r = br._sync_poll(d, {"pkg": "com.a", "cursor": "0"})
+        items = json.loads(r["items"])
+        assert [i["seq"] for i in items] == [1, 3], items
+        assert r["cursor"] == "3"
+        # cursor resumes: only newer entries
+        r = br._sync_poll(d, {"pkg": "com.a", "cursor": r["cursor"]})
+        assert json.loads(r["items"]) == []
+        # the other app sees only its own chat
+        r = br._sync_poll(d, {"pkg": "com.b", "cursor": "0"})
+        assert [i["seq"] for i in json.loads(r["items"])] == [2]
+        # unknown caller -> NOT_AUTHORIZED
+        r = br._sync_poll(d, {"pkg": "com.evil", "cursor": "0"})
+        assert r == {"ok": False, "error": "NOT_AUTHORIZED"}
+        # bad cursor -> MALFORMED
+        r = br._sync_poll(d, {"pkg": "com.a", "cursor": "abc"})
+        assert r == {"ok": False, "error": "MALFORMED"}
+    print("sync poll scoping ok")
+
+
+def test_sync_poll_prefix_isolation_shared_chat():
+    """Two apps granted the SAME chat each see only their own prefix."""
+    with tempfile.TemporaryDirectory() as d:
+        h = _mk_handle("bot@nine.testrun.org", 11, 7)
+        _write_grants(d, {
+            "com.a": {"enabled": True, "prefix": "/a",
+                      "chats_send": [], "chats_recv": [h]},
+            "com.b": {"enabled": True, "prefix": "/b",
+                      "chats_send": [], "chats_recv": [h]},
+        })
+        with open(os.path.join(d, br.SYNC_INBOX), "w") as f:
+            for seq, txt in [(1, "/a one"), (2, "/b two"), (3, "/a three"),
+                             (4, "no prefix at all")]:
+                f.write(json.dumps({"seq": seq, "ts": 1, "chat": h,
+                                    "from": "u@x", "text": txt}) + "\n")
+        ra = json.loads(br._sync_poll(d, {"pkg": "com.a", "cursor": "0"})["items"])
+        assert [i["seq"] for i in ra] == [1, 3], ra
+        rb = json.loads(br._sync_poll(d, {"pkg": "com.b", "cursor": "0"})["items"])
+        assert [i["seq"] for i in rb] == [2], rb
+        # send-scope-only app reads nothing even from its own chat
+        _write_grants(d, {"com.c": {"enabled": True, "prefix": "/a",
+                                    "chats_send": [h], "chats_recv": []}})
+        rc = br._sync_poll(d, {"pkg": "com.c", "cursor": "0"})
+        assert json.loads(rc["items"]) == []
+    print("sync poll prefix isolation ok")
+
+
+def test_sync_poll_gap_is_visible():
+    with tempfile.TemporaryDirectory() as d:
+        h = _mk_handle("bot@nine.testrun.org", 11, 7)
+        _write_grants(d, {"com.a": {"enabled": True, "prefix": "/a",
+                                    "chats_send": [], "chats_recv": [h]}})
+        with open(os.path.join(d, br.SYNC_INBOX), "w") as f:
+            for seq in (40, 41):  # caller cursor at 10: entries 11-39 dropped
+                f.write(json.dumps({"seq": seq, "ts": 1, "chat": h,
+                                    "from": "u@x", "text": "/a x"}) + "\n")
+        r = br._sync_poll(d, {"pkg": "com.a", "cursor": "10"})
+        assert r.get("gap") is True and r.get("first_available") == "40", r
+        # no gap when the cursor is current
+        r = br._sync_poll(d, {"pkg": "com.a", "cursor": "41"})
+        assert "gap" not in r, r
+        # no gap for a fresh caller at cursor 0
+        r = br._sync_poll(d, {"pkg": "com.a", "cursor": "0"})
+        assert "gap" not in r, r
+    print("sync poll gap visibility ok")
+
+
+def test_sync_inbox_retention_keeps_newest_500():
+    import types
+    with tempfile.TemporaryDirectory() as d:
+        h = _mk_handle("bot@nine.testrun.org", 11, 7)
+        _write_grants(d, {"com.a": {"enabled": True, "prefix": "/a",
+                                    "chats_send": [], "chats_recv": [h]}})
+        acct = br._FixtureAccount()
+        total = br.SYNC_INBOX_KEEP + 5
+        for mid in range(1, total + 1):
+            acct._msgs[mid] = br._FixtureMsg({"chat_id": 11, "text": "/a m",
+                "from_id": 2, "sender": br._FixtureMsg({"address": "u@x"})})
+            br._sync_on_new_message(d, acct, types.SimpleNamespace(msg_id=mid))
+        inbox = [json.loads(l)
+                 for l in open(os.path.join(d, br.SYNC_INBOX))]
+        # the contract's "newest 500" holds exactly, not KEEP + batch window
+        assert len(inbox) == br.SYNC_INBOX_KEEP, len(inbox)
+        assert inbox[0]["seq"] == 6 and inbox[-1]["seq"] == total,             (inbox[0]["seq"], inbox[-1]["seq"])
+        # ...so an old cursor sees the visible gap the contract promises
+        r = br._sync_poll(d, {"pkg": "com.a", "cursor": "1"})
+        assert r.get("gap") is True and r.get("first_available") == "6", r
+    print("sync inbox retention ok")
+
+
+def test_sync_list_chats_returns_granted_only():
+    with tempfile.TemporaryDirectory() as d:
+        ctl = _StubControl(d)
+        h_a = _mk_handle(ctl.bot_addr, 11, 7)
+        _write_grants(d, {"com.a": {"enabled": True, "prefix": "/a",
+                                    "chats_send": [], "chats_recv": [h_a]}})
+        # names need the rpc client; _sync_chat_names fails over to str(cid)
+        # when the client import/chat call fails, which is what happens here
+        r = br._sync_list_chats(d, ctl, {"pkg": "com.a"})
+        items = json.loads(r["items"])
+        assert [i["handle"] for i in items] == [h_a], items
+        r = br._sync_list_chats(d, ctl, {"pkg": "com.evil"})
+        assert r == {"ok": False, "error": "NOT_AUTHORIZED"}
+    print("sync listChats scoping ok")
+
+
+def test_sync_send_dedup_replays_response():
+    with tempfile.TemporaryDirectory() as d:
+        calls = []
+        orig = br._sync_send
+        def fake(files_dir, control, req):
+            calls.append(req.get("id"))
+            return {"ok": True, "ref": "m1"}
+        br._sync_send = fake
+        try:
+            req = {"id": "tok_1", "method": "send"}
+            r1 = br._sync_send_dedup(d, None, req)
+            r2 = br._sync_send_dedup(d, None, req)
+        finally:
+            br._sync_send = orig
+        assert r1 == {"ok": True, "ref": "m1"} and r2 == r1
+        # the retry replayed the recorded response, no second send
+        assert calls == ["tok_1"], calls
+        # and the record survives a watcher restart (it lives on disk)
+        r3 = br._sync_send_dedup(d, None, req)
+        assert r3 == r1 and calls == ["tok_1"]
+        # failed responses are NOT deduped: an explicit failure may retry
+        def fail(files_dir, control, req):
+            calls.append(req.get("id"))
+            return {"ok": False, "error": "FAILED"}
+        br._sync_send = fail
+        try:
+            rf1 = br._sync_send_dedup(d, None, {"id": "tok_2", "method": "send"})
+            rf2 = br._sync_send_dedup(d, None, {"id": "tok_2", "method": "send"})
+        finally:
+            br._sync_send = orig
+        assert not rf1["ok"] and not rf2["ok"]
+        assert calls == ["tok_1", "tok_2", "tok_2"], calls
+        print("sync send dedup replay ok")
+
+
+def test_sync_fixture_send_and_inject():
+    import types
+    with tempfile.TemporaryDirectory() as d:
+        br._FixtureChat._dir[0] = d
+        ch = br._FixtureChat(None, 11)
+        m = ch.send_message(text="hi")
+        assert m.id > 9000
+        assert '"chat_id": 11' in open(os.path.join(d, "fixture-sends.jsonl")).read()
+        open(os.path.join(d, "FIXTURE_RPC_DOWN"), "w").close()
+        try:
+            ch.send_message(text="hi")
+            assert False, "expected RuntimeError"
+        except RuntimeError:
+            pass
+        h = _mk_handle("bot@nine.testrun.org", 11, 7)
+        _write_grants(d, {"com.x": {"enabled": True, "prefix": "/x",
+                                    "chats_send": [], "chats_recv": [h]}})
+        acct = br._FixtureAccount()
+        for mid, text in ((1, "/x hi"), (2, "/y no"), (3, "plain")):
+            acct._msgs[mid] = br._FixtureMsg({"chat_id": 11, "text": text,
+                "from_id": 2, "sender": br._FixtureMsg({"address": "u@x"})})
+            br._sync_on_new_message(d, acct, types.SimpleNamespace(msg_id=mid))
+        inbox = [json.loads(l)
+                 for l in open(os.path.join(d, br.SYNC_INBOX))]
+        assert len(inbox) == 1 and inbox[0]["text"] == "/x hi", inbox
+        print("sync fixture send/inject ok")
+
+
 if __name__ == "__main__":
     test_api_conformance()
     test_state_and_binding()
@@ -1633,4 +1892,13 @@ if __name__ == "__main__":
     test_candidate_helpers_raise_on_read_failure()
     test_app_publish_candidate_uncertain_sends_nothing()
     test_candidate_absent_entry_is_definite_negative()
+    test_sync_handle_roundtrip_and_garbage()
+    test_sync_send_requires_grant_and_chat()
+    test_sync_send_dedup_replays_response()
+    test_sync_fixture_send_and_inject()
+    test_sync_poll_scopes_to_callers_chats()
+    test_sync_list_chats_returns_granted_only()
+    test_sync_poll_prefix_isolation_shared_chat()
+    test_sync_poll_gap_is_visible()
+    test_sync_inbox_retention_keeps_newest_500()
     print("ALL WRAPPER TESTS PASS")

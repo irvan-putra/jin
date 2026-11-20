@@ -1,0 +1,10 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- Debug/CI only: API 34 blocks adb shell starts of non-exported
+         services, and the emulator smoke drives BotService via am
+         startservice. Release builds keep the service non-exported. -->
+    <application>
+        <service android:name=".BotService" android:exported="true"
+            tools:replace="android:exported" />
+    </application>
+</manifest>

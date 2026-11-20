@@ -24,7 +24,9 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.InputStream;
+import org.json.JSONArray;
 import org.json.JSONObject;
+import com.vanipy.jin.transport.GrantsStore;
 
 public class MainActivity extends Activity {
     // Bot states, computed from the runtime's own files (no parallel bookkeeping):
@@ -70,6 +72,7 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Offline probe running - see View logs for its output", Toast.LENGTH_LONG).show();
         });
         findViewById(R.id.menuLogs).setOnClickListener(v -> showLogs());
+        findViewById(R.id.menuApps).setOnClickListener(v -> showConnectedApps());
         findViewById(R.id.menuExport).setOnClickListener(v -> {
             drawer.closeDrawer(GravityCompat.START);
             startExportFlow();
@@ -652,5 +655,86 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {}
         }
         return sb.length() == 0 ? "(nothing yet)" : sb.toString();
+    }
+
+    // Connected apps: default-off grants for other apps that called the
+    // transport provider (contract v1). Lists only apps that announced
+    // themselves via capabilities(); per-chat toggles once an app is granted.
+    private void showConnectedApps() {
+        GrantsStore store = new GrantsStore(this);
+        java.util.List<GrantsStore.SeenApp> apps = store.seenApps();
+        if (apps.isEmpty()) {
+            new android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("Connected apps")
+                .setMessage("No apps have connected yet. Apps that ask to work with this bot appear here, and stay blocked until you allow them.")
+                .setPositiveButton("OK", null)
+                .show();
+            return;
+        }
+        String[] labels = new String[apps.size()];
+        boolean[] checked = new boolean[apps.size()];
+        for (int i = 0; i < apps.size(); i++) {
+            GrantsStore.SeenApp a = apps.get(i);
+            labels[i] = a.pkg + "\ncert " + a.cert.substring(0, 12) + "\u2026";
+            checked[i] = a.enabled;
+        }
+        new android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("Connected apps (blocked unless allowed)")
+            .setMultiChoiceItems(labels, checked, (d, which, isChecked) -> {
+                GrantsStore.SeenApp a = apps.get(which);
+                String prefix = store.prefixFor(a.pkg);
+                if (isChecked && prefix.isEmpty()) prefix = "/" + a.pkg.split("\\.")[a.pkg.split("\\.").length - 1];
+                store.setEnabled(a.pkg, a.cert, isChecked, prefix);
+                if (isChecked) showChatGrants(store, a.pkg);
+            })
+            .setPositiveButton("Done", null)
+            .show();
+    }
+
+    private void showChatGrants(GrantsStore store, String pkg) {
+        // The python runtime writes SYNC_CHATS (JSON array of {handle,name})
+        // whenever the bot runs; without it we can only note the grant is on.
+        java.util.List<String[]> chats = new java.util.ArrayList<>();
+        try {
+            File f = new File(getFilesDir(), "SYNC_CHATS");
+            if (f.exists()) {
+                byte[] buf = new byte[(int) f.length()];
+                FileInputStream in = new FileInputStream(f);
+                int off = 0, n;
+                while (off < buf.length && (n = in.read(buf, off, buf.length - off)) > 0) off += n;
+                in.close();
+                JSONArray arr = new JSONArray(new String(buf, 0, off, "UTF-8"));
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject o = arr.getJSONObject(i);
+                    chats.add(new String[]{o.getString("handle"), o.optString("name", o.getString("handle"))});
+                }
+            }
+        } catch (Exception ignored) {}
+        if (chats.isEmpty()) {
+            Toast.makeText(this, pkg + " allowed. Per-chat choices appear here while the bot is running.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        String[] labels = new String[chats.size()];
+        for (int i = 0; i < chats.size(); i++) labels[i] = chats.get(i)[1];
+        boolean[] send = new boolean[chats.size()];
+        boolean[] recv = new boolean[chats.size()];
+        for (int i = 0; i < chats.size(); i++) {
+            send[i] = store.isChatSendGranted(pkg, chats.get(i)[0]);
+            recv[i] = store.isChatRecvGranted(pkg, chats.get(i)[0]);
+        }
+        String pfx = store.prefixFor(pkg);
+        new android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle(pkg + " may SEND messages into:")
+            .setMultiChoiceItems(labels, send,
+                (d, which, isChecked) -> store.setChatScope(pkg, chats.get(which)[0], "send", isChecked))
+            .setPositiveButton("Next", (d, w) ->
+                new android.app.AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                    .setTitle(pkg + " may READ " + (pfx.isEmpty() ? "its" : pfx) + " commands from:")
+                    .setMultiChoiceItems(labels, recv,
+                        (d2, which, isChecked) -> store.setChatScope(pkg, chats.get(which)[0], "recv", isChecked))
+                    .setPositiveButton("Done", null)
+                    .show())
+            .setNegativeButton("Cancel", null)
+            .show();
     }
 }

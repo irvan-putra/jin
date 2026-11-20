@@ -196,7 +196,8 @@ def provision(native_lib_dir, files_dir):
             addr = _account_addr(configured[0])
             if not addr:
                 raise RuntimeError("existing account has no readable transport address")
-            save_state(files_dir, provisioned=True, bot_addr=addr)
+            gen = load_state(files_dir).get("acct_gen") or int(time.time())
+            save_state(files_dir, provisioned=True, bot_addr=addr, acct_gen=gen)
             return addr
         if accounts:
             # Existing profile in an unconfigured/uncertain state: re-running
@@ -213,7 +214,8 @@ def provision(native_lib_dir, files_dir):
         addr = _account_addr(acct)
         if not addr:
             raise RuntimeError("account configured but its address is unreadable")
-        save_state(files_dir, provisioned=True, bot_addr=addr)
+        save_state(files_dir, provisioned=True, bot_addr=addr,
+                   acct_gen=int(time.time()))
         log.info("bot account created: %s", addr)
         return addr
     finally:
@@ -897,6 +899,372 @@ def _publish_watcher(files_dir, control):
                  len(result["skipped"]))
 
 
+# --------------------------------------------------------------------------
+# Cross-app transport (contract v1, docs/transport-contract.md): the Android
+# provider authenticates callers and writes SYNC_REQ_<id>; this watcher does
+# the DeltaChat side and answers SYNC_RESP_<id>. All files stay in the
+# app-private dir, exactly like the PUBLISH_REQ bridge.
+
+SYNC_ALIVE = "SYNC_ALIVE"
+SYNC_GRANTS = "SYNC_GRANTS"
+SYNC_PROCESSED = "SYNC_PROCESSED.json"
+SYNC_CHATS = "SYNC_CHATS"
+SYNC_INBOX = "SYNC_INBOX.jsonl"
+SYNC_INBOX_SEQ = "SYNC_INBOX_SEQ"
+SYNC_REFS = "SYNC_REFS"
+STAGE_TTL_S = 600
+
+
+def _sync_decode_handle(handle):
+    import base64
+    try:
+        raw = base64.urlsafe_b64decode(handle + "=" * (-len(handle) % 4))
+        addr, cid, gen = raw.decode().rsplit("|", 2)
+        return addr, int(cid), gen
+    except Exception:
+        return None, None, None
+
+
+def _sync_handles(files_dir, control):
+    import base64
+    st = control._st()
+    gen = st.get("acct_gen", 1)
+    out = []
+    for cid in sorted(control._served_chat_ids()):
+        raw = "%s|%d|g%s" % (control.bot_addr, cid, gen)
+        h = base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+        out.append((h, cid))
+    return out
+
+
+def _sync_chat_names(control):
+    from deltachat_rpc_client import Chat
+    names = {}
+    for _h, cid in _sync_handles(control.files_dir, control):
+        try:
+            snap = Chat(control.account, cid).get_basic_snapshot()
+            names[cid] = snap.get("name") or str(cid)
+        except Exception:
+            names[cid] = str(cid)
+    return names
+
+
+def _sync_grants(files_dir):
+    return _load_json(os.path.join(files_dir, SYNC_GRANTS))
+
+
+SYNC_INBOX_KEEP = 500
+
+
+def _sync_pkg_chats(files_dir, pkg):
+    """@return (send_handles, recv_handles, prefix) or None when not granted."""
+    g = _sync_grants(files_dir).get(pkg) or {}
+    if not g.get("enabled"):
+        return None
+    return (set(g.get("chats_send") or []), set(g.get("chats_recv") or []),
+            g.get("prefix") or "")
+
+
+def _sync_resp(files_dir, req_id, payload):
+    path = os.path.join(files_dir, "SYNC_RESP_" + req_id)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp, path)
+
+
+def _sync_send_dedup(files_dir, control, req):
+    """Durable in-flight/idempotency record for send requests, by client
+    token. A token that already produced a SUCCESSFUL response replays that
+    response instead of sending again - this survives watcher restarts and
+    provider crashes between the bridge send and its own ledger write.
+    Failed responses are NOT recorded: a retry after an explicit failure
+    re-attempts the send. Bounded to the newest 500 tokens."""
+    token = str(req.get("id"))
+    path = os.path.join(files_dir, SYNC_PROCESSED)
+    processed = _load_json(path)
+    if token in processed:
+        return processed[token]
+    resp = _sync_send(files_dir, control, req)
+    if resp.get("ok"):
+        processed[token] = resp
+        while len(processed) > 500:
+            processed.pop(next(iter(processed)))
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(processed, f)
+        os.replace(tmp, path)
+    return resp
+
+
+def _sync_send(files_dir, control, req):
+    from deltachat_rpc_client import Chat
+    pkg = req.get("pkg", "")
+    granted = _sync_pkg_chats(files_dir, pkg)
+    if not granted:
+        return {"ok": False, "error": "NOT_AUTHORIZED"}
+    send_chats, _recv, _prefix = granted
+    handle = req.get("chat", "")
+    if handle not in send_chats:
+        return {"ok": False, "error": "CHAT_NOT_GRANTED"}
+    addr, cid, gen = _sync_decode_handle(handle)
+    st = control._st()
+    if (addr is None or addr != control.bot_addr
+            or gen != "g%s" % st.get("acct_gen", 1)
+            or cid not in control._served_chat_ids()):
+        return {"ok": False, "error": "MALFORMED"}
+    text = req.get("text", "")
+    fname = req.get("file")
+    path = None
+    if fname:
+        if "/" in fname or fname in (".", ".."):
+            return {"ok": False, "error": "MALFORMED"}
+        path = os.path.join(files_dir, "stage", fname)
+        if not os.path.exists(path):
+            return {"ok": False, "error": "MALFORMED"}
+    try:
+        if path:
+            msg = Chat(control.account, cid).send_message(
+                text=text or None, file=path,
+                filename=req.get("filename") or None)
+        else:
+            if not text:
+                return {"ok": False, "error": "MALFORMED"}
+            msg = Chat(control.account, cid).send_message(text=text)
+    except TypeError:
+        # client API mismatch on file kwargs: fail visibly, never silently
+        # downgrade a file send to text-only
+        return {"ok": False, "error": "MALFORMED"}
+    except Exception as e:
+        return {"ok": False, "error": "FAILED", "reason": str(e)[:200]}
+    ref = "m%d" % msg.id
+    refs = _load_json(os.path.join(files_dir, SYNC_REFS))
+    refs[ref] = {"msg_id": msg.id, "chat_id": cid, "handle": handle,
+                 "ts": int(time.time())}
+    tmp = os.path.join(files_dir, SYNC_REFS) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(refs, f)
+    os.replace(tmp, os.path.join(files_dir, SYNC_REFS))
+    _sync_status_write(files_dir, ref, "QUEUED")
+    # the staged bin is left for the stage-TTL sweep: a same-token retry whose
+    # response was lost re-verifies against these bytes to get its ref back
+    return {"ok": True, "ref": ref}
+
+
+def _sync_status_write(files_dir, ref, status, reason=""):
+    path = os.path.join(files_dir, "SYNC_STATUS_" + ref)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"status": status, "reason": reason}, f)
+    os.replace(tmp, path)
+
+
+_STATE_MAP = {"OutPending": "QUEUED", "OutPreparing": "QUEUED",
+              "OutDelivered": "SENT_TO_RELAY", "OutMdnRcvd": "READ",
+              "OutFailed": "FAILED"}
+
+
+def _sync_on_msgs_changed(files_dir, account):
+    """Hook: refresh SYNC_STATUS_<ref> from real core message states."""
+    refs = _load_json(os.path.join(files_dir, SYNC_REFS))
+    if not refs:
+        return
+    terminal = {"SENT_TO_RELAY", "READ", "FAILED", "EXPIRED"}
+    for ref, rec in refs.items():
+        cur = _load_json(os.path.join(files_dir, "SYNC_STATUS_" + ref))
+        if cur.get("status") in terminal:
+            continue
+        try:
+            snap = account.get_message_by_id(rec["msg_id"]).get_snapshot()
+            st = _STATE_MAP.get(str(snap.get("state", "")))
+            if st and st != cur.get("status"):
+                _sync_status_write(files_dir, ref, st)
+        except Exception:
+            pass
+
+
+def _sync_on_new_message(files_dir, account, event):
+    """Hook: capture prefix-matching inbound messages for granted chats."""
+    grants = _sync_grants(files_dir)
+    prefixes = {}
+    for pkg, g in grants.items():
+        if not g.get("enabled"):
+            continue
+        pfx = g.get("prefix") or ""
+        if not pfx:
+            continue  # no prefix: no capture (fail closed)
+        for h in g.get("chats_recv") or []:
+            prefixes.setdefault(h, set()).add(pfx)
+    if not prefixes:
+        return
+    by_cid = {}
+    for h in prefixes:
+        _a, cid, _g = _sync_decode_handle(h)
+        if cid:
+            by_cid[cid] = h
+    try:
+        snap = account.get_message_by_id(event.msg_id).get_snapshot()
+    except Exception:
+        return
+    cid = snap.get("chat_id")
+    handle = by_cid.get(cid)
+    if not handle:
+        return
+    text = snap.get("text") or ""
+    if snap.get("from_id") == account.self_contact.id:
+        return
+    pfx = prefixes.get(handle) or {""}
+    if pfx != {""} and not any(p and text.startswith(p) for p in pfx):
+        return
+    sender = ""
+    try:
+        sender = snap["sender"].get_snapshot().get("address", "")
+    except Exception:
+        pass
+    seq_path = os.path.join(files_dir, SYNC_INBOX_SEQ)
+    try:
+        with open(seq_path) as f:
+            seq = int(f.read().strip() or "0")
+    except Exception:
+        seq = 0
+    seq += 1
+    with open(seq_path, "w") as f:
+        f.write(str(seq))
+    inbox = os.path.join(files_dir, SYNC_INBOX)
+    with open(inbox, "a") as f:
+        json.dump({"seq": seq, "ts": int(time.time()), "chat": handle,
+                   "from": sender, "text": text}, f)
+        f.write("\n")
+    # Bounded retention: keep the newest SYNC_INBOX_KEEP entries. Checked on
+    # every capture - the contract says "the newest 500", and a seq%25 batch
+    # window let up to KEEP+24 linger, which hid poll gaps that the caller
+    # must see (an old cursor only reports gap once trimming actually ran).
+    try:
+        with open(inbox) as f:
+            lines = f.readlines()
+        if len(lines) > SYNC_INBOX_KEEP:
+            tmp = inbox + ".tmp"
+            with open(tmp, "w") as f:
+                f.writelines(lines[-SYNC_INBOX_KEEP:])
+            os.replace(tmp, inbox)
+    except OSError:
+        pass
+
+
+def _sync_poll(files_dir, req):
+    pkg = req.get("pkg", "")
+    granted = _sync_pkg_chats(files_dir, pkg)
+    if not granted:
+        return {"ok": False, "error": "NOT_AUTHORIZED"}
+    _send, recv_chats, prefix = granted
+    try:
+        cursor = int(req.get("cursor") or 0)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "MALFORMED"}
+    items, max_seq, min_seen = [], cursor, None
+    path = os.path.join(files_dir, SYNC_INBOX)
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                if min_seen is None:
+                    min_seen = e.get("seq")
+                if (e.get("seq", 0) > cursor and e.get("chat") in recv_chats
+                        and prefix and (e.get("text") or "").startswith(prefix)):
+                    items.append(e)
+                    max_seq = max(max_seq, e["seq"])
+                if len(items) >= 100:
+                    break
+    resp = {"ok": True, "items": json.dumps(items), "cursor": str(max_seq)}
+    # visible gap: the caller's cursor points at entries retention already
+    # dropped, so commands may have been missed - say so, never silently skip
+    if min_seen is not None and cursor and cursor < min_seen - 1:
+        resp["gap"] = True
+        resp["first_available"] = str(min_seen)
+    return resp
+
+
+def _sync_list_chats(files_dir, control, req):
+    pkg = req.get("pkg", "")
+    granted = _sync_pkg_chats(files_dir, pkg)
+    if not granted:
+        return {"ok": False, "error": "NOT_AUTHORIZED"}
+    send_chats, recv_chats, _p = granted
+    names = _sync_chat_names(control)
+    items = [{"handle": h, "name": names.get(cid, str(cid)),
+              "send": h in send_chats, "recv": h in recv_chats}
+             for h, cid in _sync_handles(files_dir, control)
+             if h in send_chats or h in recv_chats]
+    return {"ok": True, "items": json.dumps(items)}
+
+
+def _sync_watcher(files_dir, control):
+    """Serves SYNC_REQ_<id> files written by the Android transport provider;
+    also keeps SYNC_ALIVE fresh for the provider's liveness check, mirrors
+    SYNC_CHATS for the Connected-apps UI, and sweeps expired stage files."""
+    flag = os.path.join(files_dir, STOP_FLAG)
+    alive = os.path.join(files_dir, SYNC_ALIVE)
+    stage = os.path.join(files_dir, "stage")
+    last_chat_sig = None
+    while not os.path.exists(flag):
+        try:
+            with open(alive, "w") as f:
+                f.write(str(int(time.time())))
+        except OSError:
+            pass
+        try:
+            sig = repr(_sync_handles(files_dir, control))
+            if sig != last_chat_sig:
+                last_chat_sig = sig
+                names = _sync_chat_names(control)
+                items = [{"handle": h, "name": names.get(cid, str(cid))}
+                         for h, cid in _sync_handles(files_dir, control)]
+                tmp = os.path.join(files_dir, SYNC_CHATS) + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(items, f)
+                os.replace(tmp, os.path.join(files_dir, SYNC_CHATS))
+        except Exception as e:
+            log.warning("sync chat mirror failed: %s", e)
+        try:
+            now = time.time()
+            for n in os.listdir(stage) if os.path.isdir(stage) else []:
+                fp = os.path.join(stage, n)
+                if now - os.path.getmtime(fp) > STAGE_TTL_S:
+                    os.unlink(fp)
+        except OSError:
+            pass
+        for name in sorted(os.listdir(files_dir)):
+            if not name.startswith("SYNC_REQ_"):
+                continue
+            req_id = name[len("SYNC_REQ_"):]
+            req = _load_json(os.path.join(files_dir, name))
+            try:
+                os.unlink(os.path.join(files_dir, name))
+            except OSError:
+                continue
+            try:
+                method = req.get("method")
+                if method == "send":
+                    resp = _sync_send_dedup(files_dir, control, req)
+                elif method == "listChats":
+                    resp = _sync_list_chats(files_dir, control, req)
+                elif method == "poll":
+                    resp = _sync_poll(files_dir, req)
+                else:
+                    resp = {"ok": False, "error": "UNKNOWN_METHOD"}
+            except Exception as e:
+                log.warning("sync request %s failed: %s", req_id, e)
+                resp = {"ok": False, "error": "FAILED", "reason": str(e)[:200]}
+            try:
+                _sync_resp(files_dir, req_id, resp)
+            except OSError as e:
+                log.warning("sync response %s write failed: %s", req_id, e)
+        time.sleep(1)
+
+
 def _watchdog(files_dir, rpc):
     """Real stop: Java writes STOP -> close rpc (breaks run_forever)."""
     flag = os.path.join(files_dir, STOP_FLAG)
@@ -945,10 +1313,16 @@ def run(native_lib_dir, files_dir):
         pw = threading.Thread(target=_publish_watcher, args=(files_dir, control),
                               daemon=True, name="bot-app-publish")
         pw.start()
+        sw = threading.Thread(target=_sync_watcher, args=(files_dir, control),
+                              daemon=True, name="bot-app-sync")
+        sw.start()
         ctl_bot = Bot(bot_acct, hooks=[
             (control.on_new_message, NewMessage),
+            (lambda ev: _sync_on_new_message(files_dir, bot_acct, ev), NewMessage),
             (control.on_status_update, RawEvent(EventType.WEBXDC_STATUS_UPDATE)),
             (control.on_msgs_changed, RawEvent(EventType.MSGS_CHANGED)),
+            (lambda ev: _sync_on_msgs_changed(files_dir, bot_acct),
+             RawEvent(EventType.MSGS_CHANGED)),
         ])
         control.boot_runtimes()  # needs IO (download retries)
         log.info("live bot running as %s (chats %s)",
@@ -962,6 +1336,131 @@ def run(native_lib_dir, files_dir):
                 os.unlink(lock)
             except FileNotFoundError:
                 pass
+
+
+class _FixtureControl:
+    """Account-less control for the offline transport fixture: lets the SYNC
+    bridge serve real provider traffic (auth, grants, pipes, bridge round
+    trip, failure mapping) with NO account, NO network and NO core run.
+    Sends fail visibly at the rpc boundary; inbound stays empty by
+    construction, so a poll returns an honest empty page."""
+
+    def __init__(self, files_dir):
+        self.files_dir = files_dir
+        self.account = None
+        self.bot_addr = load_state(files_dir).get(
+            "bot_addr", "bot-fixture@fixture.invalid")
+
+    def _st(self):
+        return load_state(self.files_dir)
+
+    def _served_chat_ids(self):
+        return {int(c) for c in (self._st().get("chats") or {})}
+
+
+class _FixtureMsg:
+    def __init__(self, snap):
+        self._snap = snap
+
+    def get_snapshot(self):
+        return self._snap
+
+
+class _FixtureSelfContact:
+    id = 1
+
+
+class _FixtureAccount:
+    """Just enough of the rpc account surface for the REAL capture hook."""
+    self_contact = _FixtureSelfContact()
+
+    def __init__(self):
+        self._msgs = {}
+
+    def get_message_by_id(self, mid):
+        return self._msgs[mid]
+
+
+class _FixtureChat:
+    """Synthetic rpc-boundary Chat for the fixture: every send succeeds
+    (unless files_dir/FIXTURE_RPC_DOWN exists, simulating core failure) and
+    is logged to fixture-sends.jsonl so the gate can count real send calls.
+    This proves the provider/bridge/dedup machinery only - it is NOT a
+    relay delivery of any kind."""
+    _next = [9000]
+    _dir = ["."]
+
+    def __init__(self, account, chat_id):
+        self.chat_id = chat_id
+
+    def send_message(self, text=None, file=None, filename=None):
+        if os.path.exists(os.path.join(_FixtureChat._dir[0], "FIXTURE_RPC_DOWN")):
+            raise RuntimeError("fixture rpc down")
+        _FixtureChat._next[0] += 1
+        with open(os.path.join(_FixtureChat._dir[0], "fixture-sends.jsonl"),
+                  "a") as f:
+            json.dump({"id": _FixtureChat._next[0], "chat_id": self.chat_id,
+                       "text": text, "file": file, "filename": filename}, f)
+            f.write("\n")
+        m = _FixtureMsg({"id": _FixtureChat._next[0]})
+        m.id = _FixtureChat._next[0]
+        return m
+
+    def get_basic_snapshot(self):
+        return {"name": "fixture chat %s" % self.chat_id}
+
+
+def _fixture_inject_loop(files_dir, acct, stop):
+    """Applies FIXTURE_INJECT_*.json specs through the REAL inbound capture
+    hook: {chat_id, text, from, msg_id, fill} -> _sync_on_new_message."""
+    import types
+    while not os.path.exists(stop):
+        try:
+            for n in sorted(os.listdir(files_dir)):
+                if not n.startswith("FIXTURE_INJECT_"):
+                    continue
+                spec = _load_json(os.path.join(files_dir, n))
+                try:
+                    os.unlink(os.path.join(files_dir, n))
+                except OSError:
+                    continue
+                for k in range(int(spec.get("fill") or 1)):
+                    mid = int(spec.get("msg_id") or 1000) + k
+                    acct._msgs[mid] = _FixtureMsg({
+                        "chat_id": int(spec.get("chat_id") or 11),
+                        "text": spec.get("text") or "",
+                        "from_id": 2,
+                        "sender": _FixtureMsg(
+                            {"address": spec.get("from")
+                             or "user@fixture.invalid"}),
+                    })
+                    _sync_on_new_message(files_dir, acct,
+                                         types.SimpleNamespace(msg_id=mid))
+        except Exception as e:
+            log.warning("fixture inject failed: %s", e)
+        time.sleep(0.5)
+
+
+def run_sync_fixture(files_dir):
+    """Offline SYNC-bridge fixture: runs the same watcher the live bot runs,
+    against a fixture control, with a synthetic Chat at the rpc boundary and
+    a FIXTURE_INJECT_*.json inbound injection loop driving the REAL capture
+    hook. Used by the on-device emulator gate; no account, no network, no
+    core, and no claim of relay delivery."""
+    import deltachat_rpc_client
+    deltachat_rpc_client.Chat = _FixtureChat
+    _FixtureChat._dir[0] = files_dir
+    flag = os.path.join(files_dir, STOP_FLAG)
+    try:
+        os.unlink(flag)
+    except FileNotFoundError:
+        pass
+    acct = _FixtureAccount()
+    inj = threading.Thread(target=_fixture_inject_loop,
+                           args=(files_dir, acct, flag),
+                           daemon=True, name="bot-fixture-inject")
+    inj.start()
+    _sync_watcher(files_dir, _FixtureControl(files_dir))
 
 
 def service_entry(native_lib_dir, files_dir, mode):
@@ -980,6 +1479,8 @@ def service_entry(native_lib_dir, files_dir, mode):
             log.info("PROVISION DONE addr=%s", addr)
         elif mode == "live":
             run(native_lib_dir, files_dir)
+        elif mode == "syncfixture":
+            run_sync_fixture(files_dir)
         elif mode == "export":
             # Activity stops the live service first; the quiescent DB is
             # exported here. The transfer code goes ONLY to EXPORT_RESULT

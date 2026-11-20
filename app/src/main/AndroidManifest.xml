@@ -16,6 +16,8 @@
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Personal DeltaChat delivery bot: keeps a foreground IMAP connection to a chatmail relay to deliver webxdc app updates to chats the owner granted. Started only by explicit user tap; no third-party data collection." />
         </service>
+        <provider android:name=".transport.JinProvider" android:authorities="com.vanipy.jin.transport"
+            android:exported="true" />
         <receiver android:name=".BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

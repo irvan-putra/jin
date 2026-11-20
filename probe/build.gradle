@@ -1,0 +1,17 @@
+// Transport gate probe: a second app with its own package + cert that calls
+// jin's transport provider like a real client app would. Used only by the
+// hosted emulator gate (ui-smoke.yml, transport-gate job). No dependencies,
+// no network, synthetic content only.
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.vanipy.jinprobe'
+    compileSdk 34
+    defaultConfig {
+        applicationId "com.vanipy.jinprobe"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "0.1"
+    }
+}
