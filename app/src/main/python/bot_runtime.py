@@ -588,7 +588,8 @@ class ChatControl:
             st, sender, snap.chat_id, text, is_served)
         save_state(self.files_dir,
                    capture_routes=st.get(capture_route.RouteTable.KEY, {}),
-                   capture_last_route=st.get(capture_route.LAST_ROUTE_KEY))
+                   capture_file_route=st.get(capture_route.FILE_ROUTE_KEY),
+                   capture_results_seen=st.get("capture_results_seen", []))
         from deltachat_rpc_client import Chat
         for a in acts:
             kind = a["action"]

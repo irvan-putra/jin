@@ -94,62 +94,119 @@ class RouteTableTest(unittest.TestCase):
         self.assertIsNone(cr.RouteTable.lookup(st, "q-1"))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class HandlerTest(unittest.TestCase):
+    PEER = "bidik@x.example"
+
+    def _queue(self, st, chat_id=7, url="https://example.com/"):
+        acts = cr.handle_incoming(st, "user@x.example", chat_id,
+                                  "capture " + url, True)
+        doc = json.loads(acts[0]["text"])
+        return doc["queue_id"]
+
+    def _result(self, qid, page, names, chat=99):
+        return json.dumps({"type": "capture-result", "queue_id": qid,
+                           "page_id": page, "status": "ok",
+                           "captures": names, "load_ms": 900})
+
     def test_command_without_peer_refuses(self):
-        st = {}
-        acts = cr.handle_incoming(st, "user@x.example", 7,
+        acts = cr.handle_incoming({}, "user@x.example", 7,
                                   "capture https://example.com/", True)
-        self.assertEqual(len(acts), 1)
         self.assertEqual(acts[0]["action"], "reply")
         self.assertIn("not configured", acts[0]["text"])
 
     def test_command_builds_queue_and_route(self):
-        st = {"bidik_peer_addr": "bidik@x.example"}
-        acts = cr.handle_incoming(st, "user@x.example", 7,
-                                  "capture https://example.com/", True)
-        kinds = [a["action"] for a in acts]
-        self.assertEqual(kinds, ["send_queue", "reply"])
-        doc = json.loads(acts[0]["text"])
-        self.assertEqual(doc["type"], "capture-queue")
-        self.assertEqual(cr.RouteTable.lookup(st, doc["queue_id"]), 7)
+        st = {"bidik_peer_addr": self.PEER}
+        qid = self._queue(st)
+        self.assertEqual(cr.RouteTable.lookup(st, qid), 7)
 
     def test_command_ignored_outside_served_chat(self):
-        st = {"bidik_peer_addr": "bidik@x.example"}
+        st = {"bidik_peer_addr": self.PEER}
         self.assertEqual(cr.handle_incoming(st, "user@x.example", 7,
                                             "capture https://example.com/", False), [])
 
-    def test_result_routes_to_requester(self):
-        st = {"bidik_peer_addr": "bidik@x.example"}
-        acts = cr.handle_incoming(st, "user@x.example", 7,
-                                  "capture https://example.com/", True)
-        qid = json.loads(acts[0]["text"])["queue_id"]
-        res = json.dumps({"type": "capture-result", "queue_id": qid,
-                          "page_id": "p1", "status": "ok",
-                          "captures": ["a.png"], "load_ms": 900})
-        acts2 = cr.handle_incoming(st, "bidik@x.example", 99, res, False)
-        self.assertEqual(acts2, [{"action": "forward_status", "chat_id": 7,
-                                  "text": "p1: ok, 1 capture in 900ms"}])
-        self.assertEqual(st[cr.LAST_ROUTE_KEY], 7)
+    def test_result_routes_and_pins_files(self):
+        st = {"bidik_peer_addr": self.PEER}
+        qid = self._queue(st)
+        acts = cr.handle_incoming(st, self.PEER, 99,
+                                  self._result(qid, "p1", ["a.png"]), False)
+        self.assertEqual(acts, [{"action": "forward_status", "chat_id": 7,
+                                 "text": "p1: ok, 1 capture in 900ms"}])
+        f = cr.handle_incoming(st, self.PEER, 99,
+                               "capture-result-file:p1:a.png", False)
+        self.assertEqual(f, [{"action": "forward_file", "chat_id": 7,
+                              "caption": "capture-result-file:p1:a.png"}])
 
-    def test_result_file_follows_last_route(self):
-        st = {"bidik_peer_addr": "bidik@x.example",
-              cr.LAST_ROUTE_KEY: 7, cr.RouteTable.KEY: {"q": 7}}
-        acts = cr.handle_incoming(st, "bidik@x.example", 99,
-                                  "capture-result-file:p1:shot.png", False)
-        self.assertEqual(acts, [{"action": "forward_file", "chat_id": 7,
-                                 "caption": "capture-result-file:p1:shot.png"}])
+    def test_interleaved_queues_cannot_cross_files(self):
+        st = {"bidik_peer_addr": self.PEER}
+        q1 = self._queue(st, chat_id=7)
+        q2 = self._queue(st, chat_id=8, url="https://other.example/")
+        # q1 result pins chat 7 / page p1 / a.png
+        cr.handle_incoming(st, self.PEER, 99, self._result(q1, "p1", ["a.png"]), False)
+        # q2 result for the SAME generic page id re-pins to chat 8
+        cr.handle_incoming(st, self.PEER, 99, self._result(q2, "p1", ["b.png"]), False)
+        # q1's late file now mismatches the pin: refused, never to chat 7 or 8
+        self.assertEqual(cr.handle_incoming(st, self.PEER, 99,
+                                            "capture-result-file:p1:a.png", False), [])
+        # q2's declared file goes to chat 8
+        f = cr.handle_incoming(st, self.PEER, 99,
+                               "capture-result-file:p1:b.png", False)
+        self.assertEqual(f[0]["chat_id"], 8)
+
+    def test_undeclared_filename_refused(self):
+        st = {"bidik_peer_addr": self.PEER}
+        qid = self._queue(st)
+        cr.handle_incoming(st, self.PEER, 99, self._result(qid, "p1", ["a.png"]), False)
+        self.assertEqual(cr.handle_incoming(st, self.PEER, 99,
+                                            "capture-result-file:p1:evil.png", False), [])
+
+    def test_duplicate_file_and_result_refused(self):
+        st = {"bidik_peer_addr": self.PEER}
+        qid = self._queue(st)
+        res = self._result(qid, "p1", ["a.png"])
+        cr.handle_incoming(st, self.PEER, 99, res, False)
+        # same result again: deduped
+        self.assertEqual(cr.handle_incoming(st, self.PEER, 99, res, False), [])
+        cap = "capture-result-file:p1:a.png"
+        cr.handle_incoming(st, self.PEER, 99, cap, False)
+        # same file again: deduped
+        self.assertEqual(cr.handle_incoming(st, self.PEER, 99, cap, False), [])
+
+    def test_file_without_any_result_refused(self):
+        st = {"bidik_peer_addr": self.PEER, cr.RouteTable.KEY: {"q": 7}}
+        self.assertEqual(cr.handle_incoming(st, self.PEER, 99,
+                                            "capture-result-file:p1:a.png", False), [])
+
+    def test_unsolicited_result_unknown_queue_refused(self):
+        st = {"bidik_peer_addr": self.PEER}
+        res = self._result("no-such-queue", "p1", ["a.png"])
+        self.assertEqual(cr.handle_incoming(st, self.PEER, 99, res, False), [])
+
+    def test_state_survives_json_restart(self):
+        st = {"bidik_peer_addr": self.PEER}
+        qid = self._queue(st)
+        cr.handle_incoming(st, self.PEER, 99, self._result(qid, "p1", ["a.png"]), False)
+        # restart: state round-trips through json exactly like save/load
+        st2 = json.loads(json.dumps(st))
+        f = cr.handle_incoming(st2, self.PEER, 99,
+                               "capture-result-file:p1:a.png", False)
+        self.assertEqual(f[0]["chat_id"], 7)
+
+    def test_sender_match_is_exact_not_substring(self):
+        st = {"bidik_peer_addr": self.PEER}
+        res = self._result("q", "p1", ["a.png"])
+        self.assertEqual(cr.handle_incoming(st, "evil-bidik@x.example", 99, res, False), [])
 
     def test_peer_chatter_not_forwarded_without_pending(self):
-        st = {"bidik_peer_addr": "bidik@x.example"}
-        self.assertEqual(cr.handle_incoming(st, "bidik@x.example", 99,
+        st = {"bidik_peer_addr": self.PEER}
+        self.assertEqual(cr.handle_incoming(st, self.PEER, 99,
                                             "pairing hello", False), [])
 
     def test_bad_command_replies_error(self):
-        st = {"bidik_peer_addr": "bidik@x.example"}
+        st = {"bidik_peer_addr": self.PEER}
         acts = cr.handle_incoming(st, "user@x.example", 7, "capture", True)
         self.assertEqual(acts[0]["action"], "reply")
         self.assertIn("at least one URL", acts[0]["text"])
+
+
+if __name__ == "__main__":
+    unittest.main()

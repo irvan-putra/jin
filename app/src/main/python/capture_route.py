@@ -142,7 +142,39 @@ class RouteTable:
 
 # ------------------------------------------------------- live-path handler
 
-LAST_ROUTE_KEY = "capture_last_route"
+# Pinned file correlation: a capture-result JSON declares its queue_id,
+# page_id and the exact capture filenames in order; the PNGs that follow
+# carry only "capture-result-file:<page_id>:<name>" captions. A file is
+# forwarded ONLY while it matches the pinned context (same page, declared
+# filename, not already forwarded) - a stale "last route" cannot misroute
+# an image to another requester, across interleaved queues or a restart.
+FILE_ROUTE_KEY = "capture_file_route"
+
+
+def _pin_file_route(state, queue_id, chat_id, result):
+    expected = [str(x) for x in (result.get("captures") or [])][:MAX_PAGES * 4]
+    state[FILE_ROUTE_KEY] = {
+        "queue_id": queue_id,
+        "chat_id": chat_id,
+        "page_id": result.get("page_id") or result.get("id") or "",
+        "expected": expected,
+        "received": [],
+    }
+
+
+def _file_target(state, page, name):
+    ctx = state.get(FILE_ROUTE_KEY)
+    if not ctx:
+        return None
+    if page != ctx.get("page_id"):
+        return None
+    if name in ctx.get("received", []):
+        return None  # duplicate delivery of the same file
+    expected = ctx.get("expected") or []
+    if expected and name not in expected:
+        return None  # undeclared filename: refuse, never guess a route
+    ctx.setdefault("received", []).append(name)
+    return ctx["chat_id"]
 
 
 def handle_incoming(state, sender_addr, chat_id, text, is_served):
@@ -165,23 +197,31 @@ def handle_incoming(state, sender_addr, chat_id, text, is_served):
             qid = res.get("queue_id")
             target = RouteTable.lookup(state, qid) if qid else None
             if target is not None:
-                state[LAST_ROUTE_KEY] = target
+                page = res.get("page_id") or res.get("id") or ""
+                # Result-level dedupe: a re-delivered result for the same
+                # queue+page must not forward twice.
+                seen = state.setdefault("capture_results_seen", [])
+                key = "%s/%s" % (qid, page)
+                if key in seen:
+                    return actions
+                seen.append(key)
+                del seen[:-64]
+                _pin_file_route(state, qid, target, res)
                 actions.append({"action": "forward_status", "chat_id": target,
                                 "text": result_status_line(res)})
-            return actions
+            return actions  # unknown queue_id: refused (no action)
         cap = parse_result_caption(text)
         if cap is not None:
-            # Captions carry the page, not the queue: route to the chat of
-            # the result that just preceded them (Bidik sends JSON first).
-            target = state.get(LAST_ROUTE_KEY)
+            target = _file_target(state, cap[0], cap[1])
             if target is not None:
                 actions.append({"action": "forward_file", "chat_id": target,
                                 "caption": text})
-            return actions
+            return actions  # unpinned/undeclared/duplicate: refused
         # Plain text from the peer (run summary) forwards only while a
         # route is pending - pairing chatter must not leak into chats.
         if text and state.get(RouteTable.KEY):
-            target = state.get(LAST_ROUTE_KEY)
+            ctx = state.get(FILE_ROUTE_KEY)
+            target = ctx.get("chat_id") if ctx else None
             if target is not None:
                 actions.append({"action": "forward_status", "chat_id": target,
                                 "text": "summary: " + text[:500]})
