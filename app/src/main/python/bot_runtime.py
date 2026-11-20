@@ -586,10 +586,11 @@ class ChatControl:
             return False
         acts = capture_route.handle_incoming(
             st, sender, snap.chat_id, text, is_served)
-        save_state(self.files_dir,
-                   capture_routes=st.get(capture_route.RouteTable.KEY, {}),
-                   capture_file_route=st.get(capture_route.FILE_ROUTE_KEY),
-                   capture_results_seen=st.get("capture_results_seen", []))
+        save_state(self.files_dir, **{
+            capture_route.RouteTable.KEY: st.get(
+                capture_route.RouteTable.KEY, {}),
+            capture_route.FILE_ROUTE_KEY: st.get(capture_route.FILE_ROUTE_KEY),
+            "capture_results_seen": st.get("capture_results_seen", [])})
         from deltachat_rpc_client import Chat
         for a in acts:
             kind = a["action"]
@@ -1425,9 +1426,61 @@ class _FixtureAccount:
 
     def __init__(self):
         self._msgs = {}
+        self.addr_by_id = {}          # from_id -> sender address
+        self._peer_chats = {}         # addr -> synthetic 1:1 chat id
+        self._next_peer_chat = [5000]
 
     def get_message_by_id(self, mid):
         return self._msgs[mid]
+
+    def list_transports(self):
+        return [{"addr": "fixture-bot@fixture.invalid"}]
+
+    def get_config(self, key):
+        return None
+
+    def create_contact(self, addr):
+        return _FixturePeerContact(self, addr)
+
+    def peer_chat_id(self, addr):
+        if addr not in self._peer_chats:
+            self._next_peer_chat[0] += 1
+            self._peer_chats[addr] = self._next_peer_chat[0]
+        return self._peer_chats[addr]
+
+
+class _FixturePeerContact:
+    """create_contact() result: only what the capture route uses."""
+
+    def __init__(self, account, addr):
+        self.account = account
+        self.addr = addr
+
+    def create_chat(self):
+        return _FixtureChat(self.account, self.account.peer_chat_id(self.addr))
+
+
+class _FixtureContactView:
+    """Contact(account, from_id) stand-in: resolves the sender address the
+    inject spec declared, so the route's exact-sender check runs for real."""
+
+    def __init__(self, account, contact_id):
+        self.account = account
+        self.contact_id = contact_id
+
+    def get_snapshot(self):
+        return {"addr": self.account.addr_by_id.get(self.contact_id)}
+
+
+class _FixtureSnap(dict):
+    """dict with attribute access, matching the MessageSnapshot surface the
+    route reads (snap.get(...), snap.chat_id)."""
+
+    def __getattr__(self, k):
+        try:
+            return self[k]
+        except KeyError:
+            raise AttributeError(k)
 
 
 class _FixtureChat:
@@ -1454,6 +1507,9 @@ class _FixtureChat:
         m = _FixtureMsg({"id": _FixtureChat._next[0]})
         m.id = _FixtureChat._next[0]
         return m
+
+    def send_text(self, text):
+        return self.send_message(text=text)
 
     def get_basic_snapshot(self):
         return {"name": "fixture chat %s" % self.chat_id}
@@ -1487,6 +1543,76 @@ def _fixture_inject_loop(files_dir, acct, stop):
                                          types.SimpleNamespace(msg_id=mid))
         except Exception as e:
             log.warning("fixture inject failed: %s", e)
+        time.sleep(0.5)
+
+
+def _route_fixture_runtime(files_dir):
+    """ChatControl over the fixture account with the rpc-boundary classes
+    patched, exactly as run_route_fixture sets up; tests use this too."""
+    import sys
+    import types
+    try:
+        import deltachat_rpc_client
+    except ImportError:
+        # Host test without the client installed: the fixture patches every
+        # class the route touches, so a bare module object is enough.
+        deltachat_rpc_client = types.ModuleType("deltachat_rpc_client")
+        sys.modules["deltachat_rpc_client"] = deltachat_rpc_client
+    deltachat_rpc_client.Chat = _FixtureChat
+    deltachat_rpc_client.Contact = _FixtureContactView
+    _FixtureChat._dir[0] = files_dir
+    acct = _FixtureAccount()
+    st = load_state(files_dir)
+    chats = st.get("chats", {})
+    # The fixture's served chat: serving itself is established behavior
+    # (accept-the-QR path); what this fixture proves is the ROUTE.
+    chats.setdefault("11", {"list_id": "fixture-list"})
+    save_state(files_dir, chats=chats)
+    return ChatControl(acct, files_dir), acct
+
+
+def _route_fixture_apply(files_dir, runtime, acct, spec):
+    """Drive the REAL BotRuntime.on_new_message with one injected message:
+    {chat_id, text, from, from_id, msg_id, file?}."""
+    import types
+    from_id = int(spec.get("from_id") or 2)
+    acct.addr_by_id[from_id] = spec.get("from") or "user@fixture.invalid"
+    snap = _FixtureSnap({
+        "chat_id": int(spec.get("chat_id") or 11),
+        "text": spec.get("text") or "",
+        "from_id": from_id,
+        "file": spec.get("file"),
+        "is_info": False,
+        "id": int(spec.get("msg_id") or 1000),
+    })
+    runtime.on_new_message(types.SimpleNamespace(message_snapshot=snap))
+
+
+def run_route_fixture(files_dir):
+    """Offline CAPTURE-ROUTE fixture: drives the REAL live message path
+    (BotRuntime.on_new_message, capture route included) against the fixture
+    account, applying FIXTURE_ROUTE_*.json specs until STOP_FLAG appears.
+    Sends land in fixture-sends.jsonl for the gate. No account, no network,
+    no core, and no claim of relay delivery."""
+    flag = os.path.join(files_dir, STOP_FLAG)
+    try:
+        os.unlink(flag)
+    except FileNotFoundError:
+        pass
+    runtime, acct = _route_fixture_runtime(files_dir)
+    while not os.path.exists(flag):
+        try:
+            for n in sorted(os.listdir(files_dir)):
+                if not n.startswith("FIXTURE_ROUTE_"):
+                    continue
+                spec = _load_json(os.path.join(files_dir, n))
+                try:
+                    os.unlink(os.path.join(files_dir, n))
+                except OSError:
+                    continue
+                _route_fixture_apply(files_dir, runtime, acct, spec)
+        except Exception as e:
+            log.warning("route fixture inject failed: %s", e)
         time.sleep(0.5)
 
 
@@ -1530,6 +1656,8 @@ def service_entry(native_lib_dir, files_dir, mode):
             run(native_lib_dir, files_dir)
         elif mode == "syncfixture":
             run_sync_fixture(files_dir)
+        elif mode == "routefixture":
+            run_route_fixture(files_dir)
         elif mode == "pairbidik":
             # Owner-only setup (app-private request file written by the
             # UI): store the paired Bidik peer address in state. Never a

@@ -159,7 +159,10 @@ _MAX_PINS = 8
 
 
 def _pin_file_route(state, queue_id, chat_id, result):
-    pins = state.setdefault(FILE_ROUTE_KEY, [])
+    pins = state.get(FILE_ROUTE_KEY)
+    if not isinstance(pins, list):
+        pins = []
+        state[FILE_ROUTE_KEY] = pins
     pins.append({
         "queue_id": queue_id,
         "chat_id": chat_id,
