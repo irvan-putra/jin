@@ -2,6 +2,7 @@ package com.vanipy.jin;
 
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeTrue;
 
 import android.content.Context;
 import android.content.Intent;
@@ -17,17 +18,22 @@ import org.junit.Test;
 
 /**
  * On-device proof that the documented menu entries really open the
- * diagnostics drawer. The shell smoke cannot synthesize these gestures
- * reliably through `input swipe` on the ARM-translating emulator (three
- * failed attempts), so this drives them through UiAutomator's real
- * touch-injection path - the same path an accessibility service uses.
+ * diagnostics drawer, driven through UiAutomator's real touch-injection
+ * path (the path an accessibility service uses).
  *
  * Entries under test, matching the in-app hint "swipe from the left
  * edge, or long-press anywhere":
- *  1. long-press on the scroll content (regression: the ScrollView
+ *  1. long-press on empty scroll content (regression: the ScrollView
  *     consumed every touch below the header until contentScroll got
- *     its own listener);
- *  2. a slow drag from the left screen edge.
+ *     its own listener). A dwell-swipe at an empty point below the
+ *     controls is used because the content fits the viewport, so the
+ *     ScrollView is not "scrollable" for By.scrollable(true), and a
+ *     longClick at its center would land on a button and be consumed.
+ *  2. a slow drag from the left screen edge. Skipped under gesture
+ *     navigation: Android reserves the left edge zone for the system
+ *     back gesture and DrawerLayout excludes that inset, so edge drag
+ *     opening is impossible there by platform design (real phones on
+ *     gesture nav behave the same - those users must long-press).
  */
 public class MenuEntryTest {
 
@@ -50,16 +56,21 @@ public class MenuEntryTest {
 
     @Test
     public void longPressOnScrollContentOpensMenu() {
-        UiObject2 scroll = device.wait(Until.findObject(By.scrollable(true)), TIMEOUT);
-        assertNotNull("no scrollable content on the main screen", scroll);
-        scroll.longClick();
+        int w = device.getDisplayWidth();
+        int h = device.getDisplayHeight();
+        // Dwell on empty content below the controls: same start/end,
+        // 200 steps ~= 1s hold, past the 500ms long-press timeout.
+        device.swipe(w / 2, (int) (h * 0.8), w / 2, (int) (h * 0.8), 200);
         UiObject2 logs = device.wait(Until.findObject(By.text("View logs")), TIMEOUT);
         assertNotNull("long-press on the scroll area did not open the menu", logs);
         closeMenu();
     }
 
     @Test
-    public void edgeDragOpensMenu() {
+    public void edgeDragOpensMenu() throws Exception {
+        String navMode = device.executeShellCommand("settings get secure navigation_mode").trim();
+        assumeTrue("gesture navigation owns the left edge (navigation_mode=" + navMode
+                + "); edge-drag entry is unavailable by platform design", !"2".equals(navMode));
         int w = device.getDisplayWidth();
         int h = device.getDisplayHeight();
         device.swipe(1, h / 2, w / 3, h / 2, 60);
