@@ -42,14 +42,18 @@ adb shell "run-as $PKG sh -c 'touch files/RUNNING'"
 relaunch
 shot 2-running
 
-# 3: open the left menu with a real edge swipe
-adb shell input swipe 2 1200 650 1200 250
+# 3: open the left menu. A fast fling does not grab the DrawerLayout edge on the
+# translating emulator; the app's documented long-press-anywhere does.
+adb shell input swipe 540 1200 540 1200 1200
 sleep 3
+adb shell uiautomator dump /sdcard/window.xml >/dev/null 2>&1
+adb shell cat /sdcard/window.xml | grep -q "View logs" || { echo "menu did not open"; exit 1; }
 shot 3-menu
 
-# Back closes the menu instead of leaving; screenshot after Back
+# Back closes the menu instead of leaving; fail loudly if the app lost focus
 adb shell input keyevent 4
 sleep 2
+adb shell "dumpsys window | grep mCurrentFocus" | grep -q "$PKG" || { echo "Back left the app instead of closing the menu"; exit 1; }
 shot 4-after-back
 
 ls -l shots/
