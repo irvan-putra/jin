@@ -110,14 +110,20 @@ def result_status_line(result):
 
 
 def parse_result_caption(text):
-    """Return (page_id, filename) from a capture-result-file caption, else None."""
+    """Return (queue_id, page_id, filename) from a capture-result-file
+    caption, else None. The queue_id is REQUIRED: without it a delayed
+    file from an old run is indistinguishable from a current run's file
+    at the metadata level, so two-field captions are refused outright."""
     if not text or not text.startswith("capture-result-file:"):
         return None
     rest = text[len("capture-result-file:"):]
+    qid, sep, rest = rest.partition(":")
+    if not sep or not qid:
+        return None
     page, sep, name = rest.partition(":")
     if not sep or not page or not name:
         return None
-    return page, name
+    return qid, page, name
 
 
 class RouteTable:
@@ -169,10 +175,11 @@ def _pin_complete(pin):
     return bool(expected) and all(n in pin.get("received", []) for n in expected)
 
 
-def _file_target(state, page, name):
+def _file_target(state, qid, page, name):
     pins = state.get(FILE_ROUTE_KEY) or []
     matches = [p for p in pins
-               if p.get("page_id") == page and not _pin_complete(p)]
+               if p.get("queue_id") == qid and p.get("page_id") == page
+               and not _pin_complete(p)]
     if len(matches) != 1:
         # none pending, or the same page_id in flight for two queues:
         # refuse - never guess a route from ambiguous metadata
@@ -236,7 +243,7 @@ def handle_incoming(state, sender_addr, chat_id, text, is_served):
             return actions  # unknown queue_id: refused (no action)
         cap = parse_result_caption(text)
         if cap is not None:
-            target = _file_target(state, cap[0], cap[1])
+            target = _file_target(state, cap[0], cap[1], cap[2])
             if target is not None:
                 actions.append({"action": "forward_file", "chat_id": target,
                                 "caption": text})

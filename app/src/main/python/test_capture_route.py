@@ -78,8 +78,11 @@ class ResultTest(unittest.TestCase):
         self.assertEqual(cr.result_status_line(bad), "p2: failed - boom")
 
     def test_caption_parse(self):
-        self.assertEqual(cr.parse_result_caption("capture-result-file:p1:shot.png"),
-                         ("p1", "shot.png"))
+        self.assertEqual(
+            cr.parse_result_caption("capture-result-file:q1:p1:shot.png"),
+            ("q1", "p1", "shot.png"))
+        # two-field captions predate queue-tagged files: refused outright
+        self.assertIsNone(cr.parse_result_caption("capture-result-file:p1:shot.png"))
         self.assertIsNone(cr.parse_result_caption("capture-result-file:p1"))
         self.assertIsNone(cr.parse_result_caption("hello"))
 
@@ -131,22 +134,51 @@ class HandlerTest(unittest.TestCase):
                                   self._result(qid, "p1", ["a.png"]), False)
         self.assertEqual(acts, [{"action": "forward_status", "chat_id": 7,
                                  "text": "p1: ok, 1 capture in 900ms"}])
-        f = cr.handle_incoming(st, self.PEER, 99,
-                               "capture-result-file:p1:a.png", False)
+        cap = "capture-result-file:%s:p1:a.png" % qid
+        f = cr.handle_incoming(st, self.PEER, 99, cap, False)
         self.assertEqual(f, [{"action": "forward_file", "chat_id": 7,
-                              "caption": "capture-result-file:p1:a.png"}])
+                              "caption": cap}])
 
-    def test_interleaved_same_page_id_refuses_both_sides(self):
-        # Captions carry no queue_id, so two queues in flight with the
-        # SAME page_id make a file untellable at the metadata level:
-        # BOTH sides are refused rather than one image misrouted.
+    def test_interleaved_same_page_id_still_routes_by_queue_id(self):
+        # Captions carry queue_id, so even two queues in flight with the
+        # SAME page_id and SAME basename route each file to its own
+        # requester; nothing is refused for ambiguity anymore.
         st = {"bidik_peer_addr": self.PEER}
         q1 = self._queue(st, chat_id=7)
         q2 = self._queue(st, chat_id=8, url="https://other.example/")
         cr.handle_incoming(st, self.PEER, 99, self._result(q1, "p1", ["shot.png"]), False)
         cr.handle_incoming(st, self.PEER, 99, self._result(q2, "p1", ["shot.png"]), False)
-        self.assertEqual(cr.handle_incoming(st, self.PEER, 99,
-                                            "capture-result-file:p1:shot.png", False), [])
+        f1 = cr.handle_incoming(st, self.PEER, 99,
+                                "capture-result-file:%s:p1:shot.png" % q1, False)
+        f2 = cr.handle_incoming(st, self.PEER, 99,
+                                "capture-result-file:%s:p1:shot.png" % q2, False)
+        self.assertEqual(f1[0]["chat_id"], 7)
+        self.assertEqual(f2[0]["chat_id"], 8)
+
+    def test_stale_file_from_completed_queue_never_matches_new_pin(self):
+        # A delayed duplicate from queue q1 (same page, same basename)
+        # arriving while q2's identical pin is live must NOT be delivered
+        # as q2's capture: queue_id in the caption settles it.
+        st = {"bidik_peer_addr": self.PEER}
+        q1 = self._queue(st, chat_id=7)
+        cr.handle_incoming(st, self.PEER, 99, self._result(q1, "p1", ["shot.png"]), False)
+        cr.handle_incoming(st, self.PEER, 99,
+                           "capture-result-file:%s:p1:shot.png" % q1, False)
+        # q1's page complete. q2 starts with the same page id + filename.
+        q2 = self._queue(st, chat_id=8, url="https://other.example/")
+        cr.handle_incoming(st, self.PEER, 99, self._result(q2, "p1", ["shot.png"]), False)
+        self.assertEqual(cr.handle_incoming(
+            st, self.PEER, 99,
+            "capture-result-file:%s:p1:shot.png" % q1, False), [])
+        # ... across a restart too
+        st2 = json.loads(json.dumps(st))
+        self.assertEqual(cr.handle_incoming(
+            st2, self.PEER, 99,
+            "capture-result-file:%s:p1:shot.png" % q1, False), [])
+        # q2's own file still routes
+        f = cr.handle_incoming(st2, self.PEER, 99,
+                               "capture-result-file:%s:p1:shot.png" % q2, False)
+        self.assertEqual(f[0]["chat_id"], 8)
 
     def test_interleaved_distinct_pages_route_independently(self):
         st = {"bidik_peer_addr": self.PEER}
@@ -155,9 +187,9 @@ class HandlerTest(unittest.TestCase):
         cr.handle_incoming(st, self.PEER, 99, self._result(q1, "p1", ["a.png"]), False)
         cr.handle_incoming(st, self.PEER, 99, self._result(q2, "p2", ["b.png"]), False)
         f1 = cr.handle_incoming(st, self.PEER, 99,
-                                "capture-result-file:p1:a.png", False)
+                                "capture-result-file:%s:p1:a.png" % q1, False)
         f2 = cr.handle_incoming(st, self.PEER, 99,
-                                "capture-result-file:p2:b.png", False)
+                                "capture-result-file:%s:p2:b.png" % q2, False)
         self.assertEqual(f1[0]["chat_id"], 7)
         self.assertEqual(f2[0]["chat_id"], 8)
 
@@ -175,7 +207,7 @@ class HandlerTest(unittest.TestCase):
         qid = self._queue(st)
         cr.handle_incoming(st, self.PEER, 99, self._result(qid, "p1", ["a.png"]), False)
         cr.handle_incoming(st, self.PEER, 99,
-                           "capture-result-file:p1:a.png", False)
+                           "capture-result-file:%s:p1:a.png" % qid, False)
         acts = cr.handle_incoming(st, self.PEER, 99, "run done", False)
         self.assertEqual(acts, [{"action": "forward_status", "chat_id": 7,
                                  "text": "summary: run done"}])
@@ -184,8 +216,9 @@ class HandlerTest(unittest.TestCase):
         st = {"bidik_peer_addr": self.PEER}
         qid = self._queue(st)
         cr.handle_incoming(st, self.PEER, 99, self._result(qid, "p1", ["a.png"]), False)
-        self.assertEqual(cr.handle_incoming(st, self.PEER, 99,
-                                            "capture-result-file:p1:evil.png", False), [])
+        self.assertEqual(cr.handle_incoming(
+            st, self.PEER, 99,
+            "capture-result-file:%s:p1:evil.png" % qid, False), [])
 
     def test_duplicate_file_and_result_refused(self):
         st = {"bidik_peer_addr": self.PEER}
@@ -194,15 +227,16 @@ class HandlerTest(unittest.TestCase):
         cr.handle_incoming(st, self.PEER, 99, res, False)
         # same result again: deduped
         self.assertEqual(cr.handle_incoming(st, self.PEER, 99, res, False), [])
-        cap = "capture-result-file:p1:a.png"
+        cap = "capture-result-file:%s:p1:a.png" % qid
         cr.handle_incoming(st, self.PEER, 99, cap, False)
         # same file again: deduped
         self.assertEqual(cr.handle_incoming(st, self.PEER, 99, cap, False), [])
 
     def test_file_without_any_result_refused(self):
         st = {"bidik_peer_addr": self.PEER, cr.RouteTable.KEY: {"q": 7}}
-        self.assertEqual(cr.handle_incoming(st, self.PEER, 99,
-                                            "capture-result-file:p1:a.png", False), [])
+        self.assertEqual(cr.handle_incoming(
+            st, self.PEER, 99,
+            "capture-result-file:q:p1:a.png", False), [])
 
     def test_unsolicited_result_unknown_queue_refused(self):
         st = {"bidik_peer_addr": self.PEER}
@@ -216,7 +250,7 @@ class HandlerTest(unittest.TestCase):
         # restart: state round-trips through json exactly like save/load
         st2 = json.loads(json.dumps(st))
         f = cr.handle_incoming(st2, self.PEER, 99,
-                               "capture-result-file:p1:a.png", False)
+                               "capture-result-file:%s:p1:a.png" % qid, False)
         self.assertEqual(f[0]["chat_id"], 7)
 
     def test_sender_match_is_exact_not_substring(self):
