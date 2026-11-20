@@ -30,7 +30,7 @@ while [ $i -lt 96 ]; do
       # Real menu-entry proof through UiAutomator's touch injection (the
       # shell cannot synthesize a reliable long-press/edge-drag on this
       # emulator). Runs before ui-smoke.sh writes its fixtures.
-      ./gradlew connectedDebugAndroidTest \
+      gradle connectedDebugAndroidTest \
         -Pandroid.testInstrumentationRunnerArguments.class=com.vanipy.jin.MenuEntryTest
       # The macos runner route never runs on this account, so capture the
       # same bot-state and menu screenshots right here on the translating
