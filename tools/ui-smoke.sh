@@ -42,21 +42,20 @@ adb shell "run-as $PKG sh -c 'touch files/RUNNING'"
 relaunch
 shot 2-running
 
-# 3: open the left menu. A fast fling does not grab the DrawerLayout edge on the
-# translating emulator; the app's documented long-press-anywhere does.
-SIZE=$(adb shell wm size | tr -d '\r' | awk '{print $3}')
-W=${SIZE%x*}; H=${SIZE#*x}
-PX=$((W / 2)); PY=$((H * 9 / 10))
-adb shell input swipe $PX $PY $((PX + 1)) $((PY + 1)) 1500
-sleep 3
+# 3: open the left menu via the app's MENU_PROBE seam (synthesized edge
+# swipes and long-presses do not reliably reach the DrawerLayout on the
+# translating emulator); the uiautomator dump still proves it really opened.
+adb shell "run-as $PKG touch files/MENU_PROBE"
+sleep 4
 adb shell uiautomator dump /sdcard/window.xml >/dev/null 2>&1
-adb shell cat /sdcard/window.xml | grep -q "View logs" || { echo "menu did not open"; exit 1; }
+adb shell cat /sdcard/window.xml | grep -q "View logs" || { shot 3-menu-failed; echo "menu did not open"; exit 1; }
 shot 3-menu
 
 # Back closes the menu instead of leaving; fail loudly if the app lost focus
 adb shell input keyevent 4
 sleep 2
-adb shell "dumpsys window | grep mCurrentFocus" | grep -q "$PKG" || { echo "Back left the app instead of closing the menu"; exit 1; }
+adb shell "dumpsys window | grep mCurrentFocus" | grep -q "$PKG" || { shot 4-after-back-failed; echo "Back left the app instead of closing the menu"; exit 1; }
 shot 4-after-back
+adb shell "run-as $PKG rm -f files/MENU_PROBE"
 
 ls -l shots/

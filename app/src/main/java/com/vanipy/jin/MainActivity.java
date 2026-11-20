@@ -188,6 +188,15 @@ public class MainActivity extends Activity {
     }
 
     private void refresh() {
+        // ui-smoke seam, same family as the RUNNING flag: deterministic
+        // drawer trigger because synthesized edge swipes and long-presses
+        // do not reliably reach the DrawerLayout on the ARM-translating
+        // emulator. Visibility is still proven by the screenshot; the
+        // harness removes the file after the Back check.
+        File probe = new File(getFilesDir(), "MENU_PROBE");
+        if (probe.exists() && !drawer.isDrawerOpen(GravityCompat.START)) {
+            drawer.openDrawer(GravityCompat.START);
+        }
         File f = new File(getFilesDir(), "bot_state.json");
         String fp = (f.exists() ? read(f) : "") + "|" + botState();
         if (fp.equals(lastFingerprint)) return;
