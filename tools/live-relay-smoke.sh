@@ -13,7 +13,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 # Credential handoff: stdin pipe, never command-line arguments.
 python3 -c 'import json,os; print(json.dumps({"addr": os.environ["JIN_RELAY_C_ADDR"], "mail_pw": os.environ["JIN_RELAY_C_PASSWORD"]}))' \
-  | adb shell "run-as $JIN sh -c 'cat > files/live_login.json'"
+  | adb shell "run-as $JIN sh -c 'mkdir -p files && cat > files/live_login.json'"
 test -z "$JIN_RELAY_C_ADDR" && { echo "secret env missing" >&2; exit 1; }
 
 adb shell am force-stop $JIN
