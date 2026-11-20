@@ -24,13 +24,21 @@ relaunch() {
 relaunch
 shot 0-setup
 
+# adb shell re-parses a joined command line, so nested sh -c quoting is
+# lossy (run 44679632064: the redirect escaped to the outer shell and
+# failed at cwd /). Pipe base64 on stdin instead - no inner quoting at all.
+write_state() {
+  printf '%s' "$1" | base64 | adb shell "run-as $PKG sh -c 'base64 -d > files/bot_state.json'"
+}
+
 # 1: account created, stopped
-adb shell run-as $PKG sh -c "printf '%s' '{\"provisioned\":true,\"bot_addr\":\"bot-fixture@chatmail.example\",\"chats\":{}}' > files/bot_state.json"
+write_state '{"provisioned":true,"bot_addr":"bot-fixture@chatmail.example","chats":{}}'
 relaunch
 shot 1-ready
 
 # 2: marked running (fixture RUNNING flag; service itself not started)
-adb shell run-as $PKG sh -c "printf '%s' '{\"provisioned\":true,\"bot_addr\":\"bot-fixture@chatmail.example\",\"chats\":{\"11\":{},\"22\":{}}}' > files/bot_state.json && touch files/RUNNING"
+write_state '{"provisioned":true,"bot_addr":"bot-fixture@chatmail.example","chats":{"11":{},"22":{}}}'
+adb shell "run-as $PKG sh -c 'touch files/RUNNING'"
 relaunch
 shot 2-running
 
