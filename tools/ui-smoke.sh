@@ -42,13 +42,33 @@ adb shell "run-as $PKG sh -c 'touch files/RUNNING'"
 relaunch
 shot 2-running
 
-# 3: open the left menu via the app's MENU_PROBE seam (synthesized edge
-# swipes and long-presses do not reliably reach the DrawerLayout on the
-# translating emulator); the uiautomator dump still proves it really opened.
-adb shell "run-as $PKG touch files/MENU_PROBE"
-sleep 4
-adb shell uiautomator dump /sdcard/window.xml >/dev/null 2>&1
-adb shell cat /sdcard/window.xml | grep -q "View logs" || { shot 3-menu-failed; echo "menu did not open"; exit 1; }
+# 3: open the left menu. Proof of the REAL documented entries first:
+# (a) slow edge drag from x=0, (b) long-press in the scroll area. The
+# MENU_PROBE seam is only an isolated-render fallback and says so.
+SIZE=$(adb shell wm size | tr -d '\r' | awk '{print $3}')
+W=${SIZE%x*}; H=${SIZE#*x}
+menu_open() {
+  adb shell uiautomator dump /sdcard/window.xml || echo "uiautomator dump failed: $?"
+  adb shell cat /sdcard/window.xml 2>/dev/null | grep -q "View logs"
+}
+ENTRY=none
+adb shell input swipe 0 $((H / 2)) $((W * 2 / 5)) $((H / 2)) 1200
+sleep 3
+if menu_open; then ENTRY=edge-drag; fi
+if [ "$ENTRY" = none ]; then
+  adb shell input swipe $((W / 2)) $((H * 3 / 4)) $((W / 2)) $((H * 3 / 4)) 1200
+  sleep 3
+  if menu_open; then ENTRY=long-press; fi
+fi
+if [ "$ENTRY" = none ]; then
+  echo "real menu entries did not open the drawer; MENU_PROBE seam render only"
+  adb shell "run-as $PKG touch files/MENU_PROBE"
+  sleep 4
+  menu_open || { shot 3-menu-failed; echo "menu did not open even via seam"; exit 1; }
+  ENTRY=menu-probe-seam-isolated-render-only
+  adb shell "run-as $PKG rm -f files/MENU_PROBE"
+fi
+echo "menu entry used: $ENTRY"
 shot 3-menu
 
 # Back closes the menu instead of leaving; fail loudly if the app lost focus

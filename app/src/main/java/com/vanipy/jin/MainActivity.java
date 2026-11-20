@@ -87,6 +87,10 @@ public class MainActivity extends Activity {
         // Menu without visible chrome, same as intodo: left-edge swipe (DrawerLayout)
         // plus long-press anywhere / a TalkBack action as the accessible fallback.
         installMenuAccess(findViewById(R.id.contentRoot));
+        // The ScrollView consumes the whole touch stream below the header
+        // (its onTouchEvent returns true), so without its own listener the
+        // documented "long-press anywhere" only worked on the header strip.
+        installMenuAccess(findViewById(R.id.contentScroll));
 
         // Reattach to a publish that is still in flight across recreation:
         // the request or its crash-resume checkpoint must still exist, and
