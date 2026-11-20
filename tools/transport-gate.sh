@@ -108,13 +108,29 @@ runprobe gap
 # stale queue's file. Synthetic only; no account, no relay.
 adb shell am force-stop $JIN
 printf '%s' 'bidik-fixture@fixture.invalid' | adb shell "run-as $JIN sh -c 'cat > files/PAIR_BIDIK_REQ'"
-adb shell am start -W -n $JIN/.MainActivity >/dev/null
-sleep 2
-adb shell am startservice -n $JIN/.BotService --es mode pairbidik
+# A force-stopped app starts in the background on newer Android, where
+# startservice is refused; bring it forward (wake + relaunch) and retry.
+startsvc() { # $1 = service mode
+  adb shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+  adb shell am start -W -n $JIN/.MainActivity >/dev/null
+  sleep 2
+  adb shell am startservice -n $JIN/.BotService --es mode "$1"
+}
+i=0
+until startsvc pairbidik; do
+  i=$((i+1))
+  [ $i -gt 5 ] && { echo "transport gate: cannot start pairbidik service" >&2; exit 1; }
+  sleep 3
+done
 sleep 3
 adb shell run-as $JIN cat files/bot_state.json | grep -q "bidik-fixture@fixture.invalid" || {
   echo "transport gate: pairbidik did not store the peer" >&2; exit 1; }
-adb shell am startservice -n $JIN/.BotService --es mode routefixture
+i=0
+until startsvc routefixture; do
+  i=$((i+1))
+  [ $i -gt 5 ] && { echo "transport gate: cannot start routefixture service" >&2; exit 1; }
+  sleep 3
+done
 sleep 2
 python3 - <<'GATEPY'
 import json
