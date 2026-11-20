@@ -1135,17 +1135,20 @@ def _sync_on_new_message(files_dir, account, event):
         json.dump({"seq": seq, "ts": int(time.time()), "chat": handle,
                    "from": sender, "text": text}, f)
         f.write("\n")
-    if seq % 25 == 0:  # bounded retention: keep the newest SYNC_INBOX_KEEP
-        try:
-            with open(inbox) as f:
-                lines = f.readlines()
-            if len(lines) > SYNC_INBOX_KEEP:
-                tmp = inbox + ".tmp"
-                with open(tmp, "w") as f:
-                    f.writelines(lines[-SYNC_INBOX_KEEP:])
-                os.replace(tmp, inbox)
-        except OSError:
-            pass
+    # Bounded retention: keep the newest SYNC_INBOX_KEEP entries. Checked on
+    # every capture - the contract says "the newest 500", and a seq%25 batch
+    # window let up to KEEP+24 linger, which hid poll gaps that the caller
+    # must see (an old cursor only reports gap once trimming actually ran).
+    try:
+        with open(inbox) as f:
+            lines = f.readlines()
+        if len(lines) > SYNC_INBOX_KEEP:
+            tmp = inbox + ".tmp"
+            with open(tmp, "w") as f:
+                f.writelines(lines[-SYNC_INBOX_KEEP:])
+            os.replace(tmp, inbox)
+    except OSError:
+        pass
 
 
 def _sync_poll(files_dir, req):

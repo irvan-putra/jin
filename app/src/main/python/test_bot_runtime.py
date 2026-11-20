@@ -1740,6 +1740,29 @@ def test_sync_poll_gap_is_visible():
     print("sync poll gap visibility ok")
 
 
+def test_sync_inbox_retention_keeps_newest_500():
+    import types
+    with tempfile.TemporaryDirectory() as d:
+        h = _mk_handle("bot@nine.testrun.org", 11, 7)
+        _write_grants(d, {"com.a": {"enabled": True, "prefix": "/a",
+                                    "chats_send": [], "chats_recv": [h]}})
+        acct = br._FixtureAccount()
+        total = br.SYNC_INBOX_KEEP + 5
+        for mid in range(1, total + 1):
+            acct._msgs[mid] = br._FixtureMsg({"chat_id": 11, "text": "/a m",
+                "from_id": 2, "sender": br._FixtureMsg({"address": "u@x"})})
+            br._sync_on_new_message(d, acct, types.SimpleNamespace(msg_id=mid))
+        inbox = [json.loads(l)
+                 for l in open(os.path.join(d, br.SYNC_INBOX))]
+        # the contract's "newest 500" holds exactly, not KEEP + batch window
+        assert len(inbox) == br.SYNC_INBOX_KEEP, len(inbox)
+        assert inbox[0]["seq"] == 6 and inbox[-1]["seq"] == total,             (inbox[0]["seq"], inbox[-1]["seq"])
+        # ...so an old cursor sees the visible gap the contract promises
+        r = br._sync_poll(d, {"pkg": "com.a", "cursor": "1"})
+        assert r.get("gap") is True and r.get("first_available") == "6", r
+    print("sync inbox retention ok")
+
+
 def test_sync_list_chats_returns_granted_only():
     with tempfile.TemporaryDirectory() as d:
         ctl = _StubControl(d)
@@ -1877,4 +1900,5 @@ if __name__ == "__main__":
     test_sync_list_chats_returns_granted_only()
     test_sync_poll_prefix_isolation_shared_chat()
     test_sync_poll_gap_is_visible()
+    test_sync_inbox_retention_keeps_newest_500()
     print("ALL WRAPPER TESTS PASS")
