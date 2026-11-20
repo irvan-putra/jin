@@ -24,6 +24,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import tempfile
 import time
 import urllib.parse
@@ -87,14 +88,44 @@ def main():
         if not acct.is_configured():
             raise RuntimeError("B account did not configure")
         acct.start_io()
+
+        # 1. key exchange: chatmail requires encrypted mail between
+        #    accounts, so B must hold A's autocrypt key before ANY send
+        #    (the first attempt failed here: "e2e encryption unavailable").
+        #    The running bot emits its setup-contact QR through the
+        #    owner-only invite watcher; B joins it and the cores run the
+        #    SecureJoin handshake between themselves.
+        adb("shell", "run-as", JIN, "touch", "files/INVITE_REQ")
+        deadline = time.time() + 90
+        while not adb("shell", "run-as", JIN, "cat", "files/INVITE_DONE",
+                      check=False).strip():
+            if time.time() > deadline:
+                raise RuntimeError("bot did not emit its invite QR")
+            time.sleep(2)
+        qr = adb("shell", "run-as", JIN, "cat", "files/invite.txt").decode().strip()
+        adb("shell", "run-as", JIN, "rm", "-f",
+            "files/invite.txt", "files/invite.svg", "files/INVITE_DONE",
+            check=False)
+        if not qr:
+            raise RuntimeError("invite QR file was empty")
+        acct.secure_join(qr)
+        joined = []
+        waiter = threading.Thread(
+            target=lambda: (acct.wait_for_securejoin_joiner_success(),
+                            joined.append(1)), daemon=True)
+        waiter.start()
+        waiter.join(240)
+        if not joined:
+            raise RuntimeError("securejoin handshake did not finish in 240s")
+        print("live route: securejoin handshake complete (B holds A key)")
         chat = acct.create_contact(A).create_chat()
 
-        # 1. hello: creates the DM chat on both sides; consumed by the
-        #    peer branch with no pins (no action taken by the bot).
+        # 2. hello: creates normal traffic in the fresh chat; consumed by
+        #    the peer branch with no pins (no action taken by the bot).
         chat.send_text("hello live route")
         time.sleep(20)
 
-        # 2. pin the route into A's state (chat id discovered from A's db)
+        # 3. pin the route into A's state (chat id discovered from A's db)
         entry = adb("shell", "run-as", JIN, "ls", "files/accounts").decode().split()[0]
         base = "files/accounts/%s" % entry
         tmp = os.path.join(workdir, "a.db")
@@ -125,7 +156,7 @@ def main():
             raise RuntimeError("route pin did not land in bot state")
         print("live route: pinned %s -> chat %d" % (QID, chat_id))
 
-        # 3. result JSON -> status line forwarded back
+        # 4. result JSON -> status line forwarded back
         result = {"type": "capture-result", "queue_id": QID, "page_id": PAGE,
                   "captures": [NAME], "status": "ok", "load_ms": 500}
         chat.send_text(json.dumps(result))
@@ -142,7 +173,7 @@ def main():
             raise RuntimeError("status line was not routed back within 150s")
         print("live route: status line routed A->B")
 
-        # 4. declared PNG -> forwarded back with identical bytes + caption
+        # 5. declared PNG -> forwarded back with identical bytes + caption
         png = bytes.fromhex(
             "89504e470d0a1a0a0000000d494844520000000100000001080600000"
             "01f15c4890000000d49444154789c626001000000ffff030000060005"
@@ -171,7 +202,7 @@ def main():
             raise RuntimeError("forwarded bytes differ from sent bytes")
         print("live route: capture file routed A->B with identical bytes")
 
-        # 5. stale caption (unknown queue) must NOT be forwarded
+        # 6. stale caption (unknown queue) must NOT be forwarded
         spath = os.path.join(workdir, "stale.png")
         with open(spath, "wb") as f:
             f.write(b"stale-bytes-not-a-png")
