@@ -35,9 +35,19 @@ def main():
         started = time.time()
         deadline = started + 180
         found = False
+        # A synced copy of your OWN sent message lands in the self-chat as
+        # outgoing, never as fresh - poll the self-chat itself for the token.
+        self_chat = acct.create_contact(addr).create_chat()
         while time.time() < deadline and not found:
-            for m in acct.get_fresh_messages():
-                snap = m.get_snapshot()
+            try:
+                items = self_chat.get_messages()[-20:]
+            except Exception:
+                items = []
+            for m in items:
+                try:
+                    snap = m.get_snapshot()
+                except Exception:
+                    continue
                 if token in (snap.get("text") or ""):
                     found = True
                     break

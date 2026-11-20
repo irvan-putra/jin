@@ -56,16 +56,31 @@ def run(native_lib_dir, files_dir):
             # echo may never surface here as fresh; the relay round trip is
             # witnessed by a second core instance of the SAME account on the
             # runner (multi-device sync), see tools/live-relay-smoke.sh.
+            # MessageState ints (const.MessageState): OUT_DELIVERED=26,
+            # OUT_MDN_RCVD=28, OUT_FAILED=24. The snapshot carries the raw
+            # int in this client build, not the enum name.
             state = ""
             deadline = time.time() + 60
+            delivered = False
             while time.time() < deadline:
-                state = str(msg.get_snapshot().get("state", "")).upper()
-                if "DELIVERED" in state or "MDN" in state or "SEEN" in state:
-                    break
-                if "FAILED" in state:
-                    raise RuntimeError("sent message state FAILED")
+                raw = msg.get_snapshot().get("state", "")
+                state = str(raw)
+                try:
+                    n = int(raw)
+                    if n in (26, 28):
+                        delivered = True
+                        break
+                    if n == 24:
+                        raise RuntimeError("sent message state OUT_FAILED")
+                except (TypeError, ValueError):
+                    up = state.upper()
+                    if "DELIVERED" in up or "MDN" in up or "SEEN" in up:
+                        delivered = True
+                        break
+                    if "FAILED" in up:
+                        raise RuntimeError("sent message state FAILED")
                 time.sleep(3)
-            if not ("DELIVERED" in state or "MDN" in state or "SEEN" in state):
+            if not delivered:
                 raise RuntimeError("sent message did not reach delivered state (last: %r)" % state)
             status = "ok"
             detail = "sent_state=%s send_s=%d" % (state, time.time() - started)
