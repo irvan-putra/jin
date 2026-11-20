@@ -138,3 +138,70 @@ class RouteTable:
     @staticmethod
     def drop(state, queue_id):
         return state.get(RouteTable.KEY, {}).pop(queue_id, None)
+
+
+# ------------------------------------------------------- live-path handler
+
+LAST_ROUTE_KEY = "capture_last_route"
+
+
+def handle_incoming(state, sender_addr, chat_id, text, is_served):
+    """Decide what an incoming message means for the capture route.
+
+    Pure: returns a list of action dicts for bot_runtime to execute with
+    real rpc objects; mutates `state` (route table, last-route marker) so
+    the caller can persist it. Actions:
+      {"action":"reply",       "chat_id":.., "text":..}      - into the chat
+      {"action":"send_queue",  "text":<queue json>}          - to the peer
+      {"action":"forward_status","chat_id":..,"text":..}     - result line
+      {"action":"forward_file","chat_id":..,"caption":..}    - result PNG
+    """
+    peer = state.get("bidik_peer_addr")
+    actions = []
+
+    if peer and sender_addr and sender_addr.lower() == peer.lower():
+        res = parse_result(text)
+        if res is not None:
+            qid = res.get("queue_id")
+            target = RouteTable.lookup(state, qid) if qid else None
+            if target is not None:
+                state[LAST_ROUTE_KEY] = target
+                actions.append({"action": "forward_status", "chat_id": target,
+                                "text": result_status_line(res)})
+            return actions
+        cap = parse_result_caption(text)
+        if cap is not None:
+            # Captions carry the page, not the queue: route to the chat of
+            # the result that just preceded them (Bidik sends JSON first).
+            target = state.get(LAST_ROUTE_KEY)
+            if target is not None:
+                actions.append({"action": "forward_file", "chat_id": target,
+                                "caption": text})
+            return actions
+        # Plain text from the peer (run summary) forwards only while a
+        # route is pending - pairing chatter must not leak into chats.
+        if text and state.get(RouteTable.KEY):
+            target = state.get(LAST_ROUTE_KEY)
+            if target is not None:
+                actions.append({"action": "forward_status", "chat_id": target,
+                                "text": "summary: " + text[:500]})
+        return actions
+
+    if not is_served:
+        return actions
+    try:
+        urls = parse_capture_command(text)
+    except ValueError as e:
+        return [{"action": "reply", "chat_id": chat_id, "text": str(e)}]
+    if urls is None:
+        return actions
+    if not peer:
+        return [{"action": "reply", "chat_id": chat_id,
+                 "text": "capture route not configured (no paired Bidik address)"}]
+    doc = build_queue_doc(urls)
+    RouteTable.add(state, doc["queue_id"], chat_id)
+    actions.append({"action": "send_queue", "text": json.dumps(doc)})
+    actions.append({"action": "reply", "chat_id": chat_id,
+                    "text": "queued %s: %d page%s -> Bidik" % (
+                        doc["queue_id"], len(urls), "" if len(urls) == 1 else "s")})
+    return actions

@@ -96,3 +96,60 @@ class RouteTableTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HandlerTest(unittest.TestCase):
+    def test_command_without_peer_refuses(self):
+        st = {}
+        acts = cr.handle_incoming(st, "user@x.example", 7,
+                                  "capture https://example.com/", True)
+        self.assertEqual(len(acts), 1)
+        self.assertEqual(acts[0]["action"], "reply")
+        self.assertIn("not configured", acts[0]["text"])
+
+    def test_command_builds_queue_and_route(self):
+        st = {"bidik_peer_addr": "bidik@x.example"}
+        acts = cr.handle_incoming(st, "user@x.example", 7,
+                                  "capture https://example.com/", True)
+        kinds = [a["action"] for a in acts]
+        self.assertEqual(kinds, ["send_queue", "reply"])
+        doc = json.loads(acts[0]["text"])
+        self.assertEqual(doc["type"], "capture-queue")
+        self.assertEqual(cr.RouteTable.lookup(st, doc["queue_id"]), 7)
+
+    def test_command_ignored_outside_served_chat(self):
+        st = {"bidik_peer_addr": "bidik@x.example"}
+        self.assertEqual(cr.handle_incoming(st, "user@x.example", 7,
+                                            "capture https://example.com/", False), [])
+
+    def test_result_routes_to_requester(self):
+        st = {"bidik_peer_addr": "bidik@x.example"}
+        acts = cr.handle_incoming(st, "user@x.example", 7,
+                                  "capture https://example.com/", True)
+        qid = json.loads(acts[0]["text"])["queue_id"]
+        res = json.dumps({"type": "capture-result", "queue_id": qid,
+                          "page_id": "p1", "status": "ok",
+                          "captures": ["a.png"], "load_ms": 900})
+        acts2 = cr.handle_incoming(st, "bidik@x.example", 99, res, False)
+        self.assertEqual(acts2, [{"action": "forward_status", "chat_id": 7,
+                                  "text": "p1: ok, 1 capture in 900ms"}])
+        self.assertEqual(st[cr.LAST_ROUTE_KEY], 7)
+
+    def test_result_file_follows_last_route(self):
+        st = {"bidik_peer_addr": "bidik@x.example",
+              cr.LAST_ROUTE_KEY: 7, cr.RouteTable.KEY: {"q": 7}}
+        acts = cr.handle_incoming(st, "bidik@x.example", 99,
+                                  "capture-result-file:p1:shot.png", False)
+        self.assertEqual(acts, [{"action": "forward_file", "chat_id": 7,
+                                 "caption": "capture-result-file:p1:shot.png"}])
+
+    def test_peer_chatter_not_forwarded_without_pending(self):
+        st = {"bidik_peer_addr": "bidik@x.example"}
+        self.assertEqual(cr.handle_incoming(st, "bidik@x.example", 99,
+                                            "pairing hello", False), [])
+
+    def test_bad_command_replies_error(self):
+        st = {"bidik_peer_addr": "bidik@x.example"}
+        acts = cr.handle_incoming(st, "user@x.example", 7, "capture", True)
+        self.assertEqual(acts[0]["action"], "reply")
+        self.assertIn("at least one URL", acts[0]["text"])

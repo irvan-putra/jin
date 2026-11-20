@@ -560,9 +560,57 @@ class ChatControl:
         except Exception:
             return True  # unknown -> treat as request -> ignore
 
+    def _capture_route_handle(self, event):
+        """Bidik capture route (capture_route.py). Returns True when the
+        message is consumed (all traffic from the paired peer: results are
+        routed back to requester chats, and the peer DM must never become
+        a served list). Capture COMMANDS in served chats are not consumed:
+        bridge ingest continues and the route replies alongside."""
+        import capture_route
+        snap = event.message_snapshot
+        text = snap.get("text") or ""
+        st = load_state(self.files_dir)
+        peer = st.get("bidik_peer_addr")
+        sender = None
+        from_id = snap.get("from_id")
+        if from_id:
+            from deltachat_rpc_client import Contact
+            try:
+                sender = Contact(self.account, from_id).get_snapshot().get("addr")
+            except Exception:
+                sender = None
+        from_peer = bool(peer and sender and sender.lower() == peer.lower())
+        is_served = snap.chat_id in self._served_chat_ids()
+        if not from_peer and not (
+                is_served and text.strip().lower().startswith("capture")):
+            return False
+        acts = capture_route.handle_incoming(
+            st, sender, snap.chat_id, text, is_served)
+        save_state(self.files_dir,
+                   capture_routes=st.get(capture_route.RouteTable.KEY, {}),
+                   capture_last_route=st.get(capture_route.LAST_ROUTE_KEY))
+        from deltachat_rpc_client import Chat
+        for a in acts:
+            kind = a["action"]
+            if kind in ("reply", "forward_status"):
+                Chat(self.account, a["chat_id"]).send_text(a["text"])
+            elif kind == "forward_file":
+                f = snap.get("file")
+                if f:
+                    Chat(self.account, a["chat_id"]).send_message(
+                        text=a["caption"], file=f)
+            elif kind == "send_queue":
+                self.account.create_contact(peer).create_chat().send_text(a["text"])
+        return from_peer
+
     def on_new_message(self, event):
         snap = event.message_snapshot
         chat_id = snap.chat_id
+
+        # 0) Bidik capture route: peer traffic is consumed here; capture
+        #    commands in served chats reply alongside normal ingest.
+        if self._capture_route_handle(event):
+            return
 
         # 1) served chat traffic -> that chat's bridge only. An info
         #    message can also record the bot's removal: revoke live.
