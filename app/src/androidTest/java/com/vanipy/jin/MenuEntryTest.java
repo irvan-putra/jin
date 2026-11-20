@@ -13,6 +13,8 @@ import androidx.test.uiautomator.UiDevice;
 import androidx.test.uiautomator.UiObject2;
 import androidx.test.uiautomator.Until;
 
+import android.os.SystemClock;
+
 import org.junit.Before;
 import org.junit.Test;
 
@@ -29,11 +31,11 @@ import org.junit.Test;
  *     controls is used because the content fits the viewport, so the
  *     ScrollView is not "scrollable" for By.scrollable(true), and a
  *     longClick at its center would land on a button and be consumed.
- *  2. a slow drag from the left screen edge. Skipped under gesture
- *     navigation: Android reserves the left edge zone for the system
- *     back gesture and DrawerLayout excludes that inset, so edge drag
- *     opening is impossible there by platform design (real phones on
- *     gesture nav behave the same - those users must long-press).
+ *  2. a slow drag from the left screen edge, verified under 3-button
+ *     navigation. Under gesture navigation the left edge zone belongs
+ *     to the system back gesture, so the test temporarily switches the
+ *     emulator to 3-button nav; if that switch fails the leg is reported
+ *     UNPROVEN (skipped), never as passed.
  */
 public class MenuEntryTest {
 
@@ -68,15 +70,38 @@ public class MenuEntryTest {
 
     @Test
     public void edgeDragOpensMenu() throws Exception {
-        String navMode = device.executeShellCommand("settings get secure navigation_mode").trim();
-        assumeTrue("gesture navigation owns the left edge (navigation_mode=" + navMode
-                + "); edge-drag entry is unavailable by platform design", !"2".equals(navMode));
-        int w = device.getDisplayWidth();
-        int h = device.getDisplayHeight();
-        device.swipe(1, h / 2, w / 3, h / 2, 60);
-        UiObject2 logs = device.wait(Until.findObject(By.text("View logs")), TIMEOUT);
-        assertNotNull("left-edge drag did not open the menu", logs);
-        closeMenu();
+        // Under gesture navigation Android reserves the left edge for the
+        // system back gesture. Prove the app's edge entry where the
+        // platform permits it: switch to 3-button navigation for this
+        // test and switch back afterwards. If the switch does not take,
+        // the leg stays explicitly UNPROVEN - it is not reported as passed.
+        String navMode = readNavMode();
+        boolean forced = false;
+        if (!"0".equals(navMode)) {
+            device.executeShellCommand("settings put secure navigation_mode 0");
+            SystemClock.sleep(2000);
+            navMode = readNavMode();
+            forced = "0".equals(navMode);
+        }
+        assumeTrue("edge entry UNPROVEN: could not switch emulator out of gesture nav "
+                + "(navigation_mode=" + navMode + "); needs a 3-button-nav device to verify",
+                "0".equals(navMode));
+        try {
+            int w = device.getDisplayWidth();
+            int h = device.getDisplayHeight();
+            device.swipe(1, h / 2, w / 3, h / 2, 60);
+            UiObject2 logs = device.wait(Until.findObject(By.text("View logs")), TIMEOUT);
+            assertNotNull("left-edge drag did not open the menu", logs);
+            closeMenu();
+        } finally {
+            if (forced) {
+                device.executeShellCommand("settings put secure navigation_mode 2");
+            }
+        }
+    }
+
+    private String readNavMode() throws Exception {
+        return device.executeShellCommand("settings get secure navigation_mode").trim();
     }
 
     private void closeMenu() {
