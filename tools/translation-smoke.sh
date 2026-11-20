@@ -27,6 +27,10 @@ while [ $i -lt 96 ]; do
     *"VALIDATION PASS"*)
       echo "translation smoke: VALIDATION PASS"
       echo "$LOG"
+      # The macos runner route never runs on this account, so capture the
+      # same bot-state and menu screenshots right here on the translating
+      # emulator (ui-smoke.sh is plain adb, arch-independent).
+      sh tools/ui-smoke.sh
       exit 0 ;;
     *"VALIDATION FAIL"*)
       echo "translation smoke: VALIDATION FAIL" >&2

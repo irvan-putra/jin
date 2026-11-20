@@ -16,7 +16,8 @@ shot() { adb exec-out screencap -p > "shots/$1.png"; }
 relaunch() {
   adb shell am force-stop $PKG
   adb shell am start -W -n $PKG/.MainActivity >/dev/null
-  sleep 4
+  # generous settle: ARM translation makes every frame slower
+  sleep 8
 }
 
 # 0: fresh install, setup state
@@ -35,12 +36,12 @@ shot 2-running
 
 # 3: open the left menu with a real edge swipe
 adb shell input swipe 2 1200 650 1200 250
-sleep 2
+sleep 3
 shot 3-menu
 
 # Back closes the menu instead of leaving; screenshot after Back
 adb shell input keyevent 4
-sleep 1
+sleep 2
 shot 4-after-back
 
 ls -l shots/
