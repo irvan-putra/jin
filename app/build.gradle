@@ -43,4 +43,8 @@ dependencies {
     // On-device entry-point proof (UiAutomator); never shipped in the APK.
     androidTestImplementation 'androidx.test:runner:1.5.2'
     androidTestImplementation 'androidx.test.uiautomator:uiautomator:2.3.0'
+    // test-platform's FileTestStorage references kotlin.jvm.internal.Lambda;
+    // the app itself is Java+Chaquopy and ships no kotlin-stdlib, so the
+    // instrumentation crashed with NoClassDefFoundError before any test ran.
+    androidTestImplementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.24'
 }
