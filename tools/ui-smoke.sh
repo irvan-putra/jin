@@ -44,7 +44,10 @@ shot 2-running
 
 # 3: open the left menu. A fast fling does not grab the DrawerLayout edge on the
 # translating emulator; the app's documented long-press-anywhere does.
-adb shell input swipe 540 1200 540 1200 1200
+SIZE=$(adb shell wm size | tr -d '\r' | awk '{print $3}')
+W=${SIZE%x*}; H=${SIZE#*x}
+PX=$((W / 2)); PY=$((H * 9 / 10))
+adb shell input swipe $PX $PY $((PX + 1)) $((PY + 1)) 1500
 sleep 3
 adb shell uiautomator dump /sdcard/window.xml >/dev/null 2>&1
 adb shell cat /sdcard/window.xml | grep -q "View logs" || { echo "menu did not open"; exit 1; }
