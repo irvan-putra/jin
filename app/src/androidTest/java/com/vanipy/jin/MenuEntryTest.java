@@ -6,6 +6,7 @@ import static org.junit.Assume.assumeTrue;
 
 import android.content.Context;
 import android.content.Intent;
+import android.os.SystemClock;
 
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.uiautomator.By;
@@ -13,15 +14,18 @@ import androidx.test.uiautomator.UiDevice;
 import androidx.test.uiautomator.UiObject2;
 import androidx.test.uiautomator.Until;
 
-import android.os.SystemClock;
-
 import org.junit.Before;
 import org.junit.Test;
+
+import java.io.File;
 
 /**
  * On-device proof that the documented menu entries really open the
  * diagnostics drawer, driven through UiAutomator's real touch-injection
- * path (the path an accessibility service uses).
+ * path (the path an accessibility service uses). Every gesture leg
+ * captures a screenshot and a window-hierarchy dump into the app's
+ * external files dir (pulled into shots/menu-evidence by the workflow)
+ * so a failure shows what was actually on screen.
  *
  * Entries under test, matching the in-app hint "swipe from the left
  * edge, or long-press anywhere":
@@ -34,8 +38,9 @@ import org.junit.Test;
  *  2. a slow drag from the left screen edge, verified under 3-button
  *     navigation. Under gesture navigation the left edge zone belongs
  *     to the system back gesture, so the test temporarily switches the
- *     emulator to 3-button nav; if that switch fails the leg is reported
- *     UNPROVEN (skipped), never as passed.
+ *     emulator to 3-button nav; a screenshot right after the switch
+ *     records the real nav-bar state. If the switch fails the leg is
+ *     reported UNPROVEN (skipped), never as passed.
  */
 public class MenuEntryTest {
 
@@ -43,11 +48,13 @@ public class MenuEntryTest {
     private static final long TIMEOUT = 10_000;
 
     private UiDevice device;
+    private File evidenceDir;
 
     @Before
     public void launch() {
         device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
         Context ctx = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        evidenceDir = ctx.getExternalFilesDir(null);
         Intent intent = ctx.getPackageManager().getLaunchIntentForPackage(PKG);
         assertNotNull(intent);
         intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK);
@@ -60,21 +67,19 @@ public class MenuEntryTest {
     public void longPressOnScrollContentOpensMenu() {
         int w = device.getDisplayWidth();
         int h = device.getDisplayHeight();
+        evidence("longpress-before");
         // Dwell on empty content below the controls: same start/end,
         // 200 steps ~= 1s hold, past the 500ms long-press timeout.
         device.swipe(w / 2, (int) (h * 0.8), w / 2, (int) (h * 0.8), 200);
+        evidence("longpress-after");
         UiObject2 logs = device.wait(Until.findObject(By.text("View logs")), TIMEOUT);
-        assertNotNull("long-press on the scroll area did not open the menu", logs);
+        assertNotNull("long-press on the scroll area did not open the menu"
+                + " (see menu-evidence/longpress-after.png + .uix)", logs);
         closeMenu();
     }
 
     @Test
     public void edgeDragOpensMenu() throws Exception {
-        // Under gesture navigation Android reserves the left edge for the
-        // system back gesture. Prove the app's edge entry where the
-        // platform permits it: switch to 3-button navigation for this
-        // test and switch back afterwards. If the switch does not take,
-        // the leg stays explicitly UNPROVEN - it is not reported as passed.
         String navMode = readNavMode();
         boolean forced = false;
         if (!"0".equals(navMode)) {
@@ -83,6 +88,8 @@ public class MenuEntryTest {
             navMode = readNavMode();
             forced = "0".equals(navMode);
         }
+        // Records the actual nav-bar state after the switch attempt.
+        evidence("edge-navmode-" + navMode);
         assumeTrue("edge entry UNPROVEN: could not switch emulator out of gesture nav "
                 + "(navigation_mode=" + navMode + "); needs a 3-button-nav device to verify",
                 "0".equals(navMode));
@@ -90,13 +97,24 @@ public class MenuEntryTest {
             int w = device.getDisplayWidth();
             int h = device.getDisplayHeight();
             device.swipe(1, h / 2, w / 3, h / 2, 60);
+            evidence("edge-after");
             UiObject2 logs = device.wait(Until.findObject(By.text("View logs")), TIMEOUT);
-            assertNotNull("left-edge drag did not open the menu", logs);
+            assertNotNull("left-edge drag did not open the menu"
+                    + " (see menu-evidence/edge-after.png + .uix)", logs);
             closeMenu();
         } finally {
             if (forced) {
                 device.executeShellCommand("settings put secure navigation_mode 2");
             }
+        }
+    }
+
+    private void evidence(String name) {
+        try {
+            device.takeScreenshot(new File(evidenceDir, name + ".png"));
+            device.dumpWindowHierarchy(new File(evidenceDir, name + ".uix"));
+        } catch (Exception e) {
+            System.out.println("evidence capture failed for " + name + ": " + e);
         }
     }
 

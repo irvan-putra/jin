@@ -30,13 +30,20 @@ while [ $i -lt 96 ]; do
       # Real menu-entry proof through UiAutomator's touch injection (the
       # shell cannot synthesize a reliable long-press/edge-drag on this
       # emulator). Runs before ui-smoke.sh writes its fixtures.
+      set +e
       gradle connectedDebugAndroidTest \
         -Pandroid.testInstrumentationRunnerArguments.class=com.vanipy.jin.MenuEntryTest
+      rc=$?
+      set -e
+      # In-test evidence (screenshots + hierarchy dumps) lands in the
+      # app's external files dir; pull it whatever the test outcome was.
+      mkdir -p shots/menu-evidence
+      adb pull /sdcard/Android/data/$PKG/files/ shots/menu-evidence/ || true
       # The macos runner route never runs on this account, so capture the
       # same bot-state and menu screenshots right here on the translating
       # emulator (ui-smoke.sh is plain adb, arch-independent).
       sh tools/ui-smoke.sh
-      exit 0 ;;
+      exit $rc ;;
     *"VALIDATION FAIL"*)
       echo "translation smoke: VALIDATION FAIL" >&2
       echo "$LOG" >&2
