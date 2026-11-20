@@ -88,9 +88,10 @@ public class MainActivity extends Activity {
         // plus long-press anywhere / a TalkBack action as the accessible fallback.
         installMenuAccess(findViewById(R.id.contentRoot));
         // The ScrollView consumes the whole touch stream below the header
-        // (its onTouchEvent returns true), so without its own listener the
-        // documented "long-press anywhere" only worked on the header strip.
-        installMenuAccess(findViewById(R.id.contentScroll));
+        // and never calls View.onTouchEvent, so an OnLongClickListener on
+        // it can never fire - detect the long-press from the touch stream
+        // directly instead (the documented "long-press anywhere" entry).
+        installScrollMenuAccess(findViewById(R.id.contentScroll));
 
         // Reattach to a publish that is still in flight across recreation:
         // the request or its crash-resume checkpoint must still exist, and
@@ -289,6 +290,42 @@ public class MainActivity extends Activity {
             .setView(sv)
             .setPositiveButton("Close", null)
             .show();
+    }
+
+    private void installScrollMenuAccess(final View v) {
+        final Handler h = new Handler();
+        final int slop = android.view.ViewConfiguration.get(v.getContext()).getScaledTouchSlop();
+        final long timeout = android.view.ViewConfiguration.getLongPressTimeout();
+        final float[] down = new float[2];
+        final Runnable[] check = new Runnable[1];
+        v.setOnTouchListener((view, ev) -> {
+            switch (ev.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    down[0] = ev.getX();
+                    down[1] = ev.getY();
+                    check[0] = () -> drawer.openDrawer(GravityCompat.START);
+                    h.postDelayed(check[0], timeout);
+                    break;
+                case android.view.MotionEvent.ACTION_MOVE:
+                    if (check[0] != null
+                            && (Math.abs(ev.getX() - down[0]) > slop
+                                    || Math.abs(ev.getY() - down[1]) > slop)) {
+                        h.removeCallbacks(check[0]);
+                        check[0] = null;
+                    }
+                    break;
+                case android.view.MotionEvent.ACTION_UP:
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    if (check[0] != null) {
+                        h.removeCallbacks(check[0]);
+                        check[0] = null;
+                    }
+                    break;
+                default:
+                    break;
+            }
+            return false; // observe only: scrolling and children keep working
+        });
     }
 
     private void installMenuAccess(View v) {
