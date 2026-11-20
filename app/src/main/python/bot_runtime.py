@@ -1481,6 +1481,10 @@ def service_entry(native_lib_dir, files_dir, mode):
             run(native_lib_dir, files_dir)
         elif mode == "syncfixture":
             run_sync_fixture(files_dir)
+        elif mode == "selfecho":
+            # CI-only live-relay sign-in proof; see live_relay.py.
+            import live_relay
+            live_relay.run(native_lib_dir, files_dir)
         elif mode == "export":
             # Activity stops the live service first; the quiescent DB is
             # exported here. The transfer code goes ONLY to EXPORT_RESULT
