@@ -15,8 +15,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 # Served-chat state as an accepted chat would have produced, plus the
 # owner-only pairing request the drawer dialog writes.
 printf '%s' '{"provisioned":true,"bot_addr":"bot-fixture@fixture.invalid","acct_gen":1,"chats":{"11":{}}}' \
-  | adb shell "run-as $JIN sh -c 'cat > files/bot_state.json'"
-printf '%s' 'bidik-fixture@fixture.invalid' | adb shell "run-as $JIN sh -c 'cat > files/PAIR_BIDIK_REQ'"
+  | adb shell "run-as $JIN sh -c 'mkdir -p files && cat > files/bot_state.json'"
+printf '%s' 'bidik-fixture@fixture.invalid' | adb shell "run-as $JIN sh -c 'mkdir -p files && cat > files/PAIR_BIDIK_REQ'"
 
 adb shell am start -W -n $JIN/.MainActivity >/dev/null
 sleep 2

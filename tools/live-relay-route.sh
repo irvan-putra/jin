@@ -22,9 +22,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 # Owner-only pairing request (peer = B) and account-A credential handoff:
 # stdin pipes, never command-line arguments.
 python3 -c 'import os,sys; sys.stdout.write(os.environ["JIN_RELAY_B_ADDR"])' \
-  | adb shell "run-as $JIN sh -c 'cat > files/PAIR_BIDIK_REQ'"
+  | adb shell "run-as $JIN sh -c 'mkdir -p files && cat > files/PAIR_BIDIK_REQ'"
 python3 -c 'import json,os; print(json.dumps({"addr": os.environ["JIN_RELAY_A_ADDR"], "mail_pw": os.environ["JIN_RELAY_A_PASSWORD"]}))' \
-  | adb shell "run-as $JIN sh -c 'cat > files/live_login.json'"
+  | adb shell "run-as $JIN sh -c 'mkdir -p files && cat > files/live_login.json'"
 
 adb shell am force-stop $JIN
 adb shell am start -W -n $JIN/.MainActivity >/dev/null
