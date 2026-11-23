@@ -1,4 +1,4 @@
-package com.instinct.widget.bot
+package com.vanipy.tindak.bot
 
 import android.app.Activity
 import android.app.AlertDialog

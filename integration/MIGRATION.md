@@ -94,7 +94,7 @@ same-device path unverified, heavier code).
 - Chaquopy pip: `deltachat-rpc-client==2.69.0` AND `cryptography` (Fernet).
 - Native: same `librpcsrv.so` pin as scratch
   (sha256 101c7c59675f295efa601eba0e4bcf01fa2456e44b8aa9ed2fa999c6fb995257).
-- Kotlin: `integration/BotImport.kt` -> `com.instinct.widget.bot`, call from
+- Kotlin: `integration/BotImport.kt` -> `com.vanipy.tindak.bot`, call from
   BotActivity; forward `onActivityResult`.
 - First-service-start rule: start BotService only after
   `BotImport` reports success (import commits before returning).
