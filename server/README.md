@@ -116,6 +116,18 @@ Tests (no network): `python -m unittest discover -s tests -v`
 
 ## Provenance
 
-`app/bot_runtime.py`, `app/ops_store.py`, `app/migration.py` are
-byte-identical copies of the phone runtime (`../app/src/main/python/` at
-the same commit). Port changes deliberately; do not let them drift.
+`app/bot_runtime.py`, `app/ops_store.py`, `app/migration.py`,
+`app/bot.py`, `app/delivery_bot.py` are byte-identical copies of the
+phone runtime (`../app/src/main/python/` at the same commit). Port
+changes deliberately; do not let them drift. Deliberately NOT packaged:
+`capture_route.py` and `live_relay.py` (parked/CI-only phone paths) -
+`tests/test_depclosure.py` walks the transitive import closure and
+proves the package is complete minus these documented exclusions.
+
+`tests/test_bot_runtime.py` is the phone's 58-function offline
+conformance suite (real rpc-client classes over a fake transport),
+adapted two lines for the server layout plus a `load_tests` wrapper;
+the 9 `test_sync_*` functions cover the parked sync bridge and stay
+phone-only. The other 49 run against the exact hosted configuration
+(srv_rpc patch applied), proving the package can serve accepted
+group/DM chats end to end, not just pass unit tests.
