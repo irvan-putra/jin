@@ -59,6 +59,18 @@ tindak", which pauses the live bot and writes ONE encrypted `.dcmig` bundle
   built with no owner address, so their DM command surface refuses everyone
   by construction.
 
+## Purpose and the parked Bidik link
+
+jin is the shared on-phone DeltaChat bot host that the owner's other apps
+can talk through. The first planned user is bidik (capture requests in,
+results out, both over DeltaChat, no phone number or login). That link is
+parked: the Jin side route and transport provider exist, bidik does not use
+them yet, and nothing is proven on a real phone. See
+[docs/bidik-link.md](docs/bidik-link.md).
+
+A public demo bot is not running. It would need always-on paid hosting
+(see `server/DEPLOY.md`), which has not been approved.
+
 ## Related projects
 
 - [tindak](https://github.com/irvan-putra/tindak) embeds this same bot
