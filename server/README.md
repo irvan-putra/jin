@@ -36,7 +36,11 @@ No block storage: NEO volumes meter separately (learned from Naung,
   Run ONE always-on replica.
 
 The capture-route sync bridge (bidik integration) is phone-only and is not
-started here; that integration is parked.
+started here; that integration is parked. Because `bot_runtime.py` stays
+byte-identical to the phone (where the handler imports `capture_route`
+lazily per message), the service adapter (`srv_rpc.patch_bot_runtime`)
+replaces the capture handler with a no-op that never consumes a message
+when the module is absent - normal chat handling is unchanged.
 
 ## Configuration (env vars, injected by NEO App)
 
