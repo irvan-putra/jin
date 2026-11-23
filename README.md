@@ -12,6 +12,11 @@ isolated list — a group gets a shared list, a direct chat gets a personal
 list. There is no owner identity and no chat-side management; all management
 is app-side.
 
+Web page: <https://vanipy.com/jin/> explains jin, shows the install steps and
+links the latest APK (with a QR for the APK download only). It has no bot
+contact QR: the invitation QR is a bearer invite made on your phone, and no
+public demo bot is running. Source: `web/`.
+
 ## Using jin
 
 1. **Create bot account** — one tap, one time. jin provisions ONE dedicated

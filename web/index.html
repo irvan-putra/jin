@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jin - run a DeltaChat bot from your phone</title>
+<meta name="description" content="jin turns an Android phone into a small DeltaChat bot host. This page explains it and links the app.">
+<link rel="icon" href="icon.png">
+<style>
+:root{--ink:#0E5C4B;--ink2:#093B30;--amber:#FFB300;--bg:#FAFAF7;--fg:#1c2421;--card:#fff;--line:#d9ddd8;--mute:#5b6560;color-scheme:light dark}
+@media(prefers-color-scheme:dark){:root{--bg:#101513;--fg:#e8ece9;--card:#18201d;--line:#2c3733;--mute:#9aa6a0}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
+header{background:var(--ink);color:#fff;padding:.7rem 1rem;display:flex;align-items:center;gap:.7rem}
+header img{width:36px;height:36px;border-radius:8px}
+header h1{font-size:1.15rem;margin:0;flex:1}
+header a{color:#fff}
+main{max-width:44rem;margin:0 auto;padding:.8rem 1rem 3rem}
+h2{font-size:1.1rem;margin:1.4rem 0 .3rem}
+.btn{display:inline-block;padding:.55rem .9rem;border:1px solid var(--line);border-radius:8px;background:var(--card);color:inherit;text-decoration:none;min-height:44px}
+.btn.primary{background:var(--ink);border-color:var(--ink);color:#fff}
+.note{border:1px solid var(--line);border-left:4px solid var(--amber);background:var(--card);border-radius:8px;padding:.55rem .7rem;margin:.8rem 0;font-size:.92rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:.7rem .9rem;margin:.6rem 0}
+.qr{display:flex;gap:1rem;align-items:center;flex-wrap:wrap}
+.qr img{width:160px;height:160px;background:#fff;border-radius:8px;padding:4px;border:1px solid var(--line)}
+code{font-size:.82rem;word-break:break-all}
+ol,ul{padding-left:1.2rem}li{margin:.3rem 0}
+.sub{color:var(--mute);font-size:.88rem}
+footer{color:var(--mute);font-size:.85rem;margin-top:1.5rem}
+</style>
+</head>
+<body>
+<header><img src="icon.png" alt="" width="36" height="36"><h1>jin</h1><a href="https://github.com/irvan-putra/jin">source</a></header>
+<main>
+  <p>jin turns an Android phone into a small bot host for <a href="https://delta.chat">Delta Chat</a>. It makes the bot its own chatmail account, answers messages in the chats you invite it to, and delivers webxdc apps (<code>.xdc</code> files) to those chats. It all runs on the phone. The only network traffic is mail to the public chatmail relay.</p>
+  <p><a class="btn primary" href="https://github.com/irvan-putra/jin/releases/download/v0.5.2/jin-v0.5.2.apk">Download jin for Android v0.5.2</a>
+     <a class="btn" href="https://github.com/irvan-putra/jin/releases/tag/v0.5.2">Release notes</a></p>
+  <div class="note">Jin needs a phone: the bot is an Android foreground service, so it cannot run inside a web page. This page is the explanation and install guide. Test release; real-device behavior is still being checked.</div>
+
+  <h2>Install</h2>
+  <ol>
+    <li>On your phone, open the download button above (or scan the code below from another screen). It saves <code>jin-v0.5.2.apk</code>.</li>
+    <li>Open the file. If Android asks, allow installs from your browser or files app for this one install.</li>
+    <li>Optional: check the SHA-256 is <code>d518a324760c39e65575ee161431cae0107385c7e0625cb4098ae80f4253569a</code>.</li>
+    <li>Install <a href="https://delta.chat/en/download">Delta Chat</a> on the phone or computer you will chat from.</li>
+  </ol>
+  <div class="card qr">
+    <img src="apk-qr.svg" alt="QR code for the jin APK download" width="160" height="160">
+    <div><b>Scan to download the jin app</b><div class="sub">This QR opens the APK download link above. It is not a Delta Chat contact and does not reach any bot.</div></div>
+  </div>
+
+  <h2>Set up your own bot</h2>
+  <ol>
+    <li><b>Create bot account.</b> One tap, one time. jin makes one dedicated chatmail profile for the bot. It is never your personal account; the address shows in the app.</li>
+    <li><b>Start bot.</b> A permanent notification keeps the foreground service running. Stop writes a real stop.</li>
+    <li><b>Show invitation QR.</b> jin draws the bot's Delta Chat contact QR on demand. Scan it from another device, or tap "Open in DeltaChat" on the same phone, then send the bot any message.</li>
+    <li><b>Add the bot to chats.</b> Each group gets its own shared list, each direct chat its own personal list.</li>
+    <li><b>Publish an app version.</b> Pick an <code>.xdc</code> file and the bot sends it to every chat it serves.</li>
+  </ol>
+  <div class="note"><b>Why there is no bot QR on this page.</b> The invitation QR is a bearer invite: whoever holds it can reach that bot. Yours is made on your phone and should stay with the people you pick, so it cannot be a public code here. A public demo bot would need a server running all the time; there is none yet.</div>
+
+  <h2>Trust and limits</h2>
+  <ul>
+    <li>Contact requests are refused. Only holders of the invitation QR get in.</li>
+    <li>No chat can publish or administer the bot; all management is in the app.</li>
+    <li>Each chat's data is kept apart from every other chat's.</li>
+    <li>When the bot is removed from a chat, access pauses; re-adding resumes the same list.</li>
+    <li>Android only (arm64). The bot is on only while the service runs, so a phone that is off or has killed the service will not answer.</li>
+  </ul>
+
+  <footer>jin source is public: <a href="https://github.com/irvan-putra/jin">github.com/irvan-putra/jin</a> · <a href="https://github.com/irvan-putra/jin/releases">all releases</a> · related: <a href="https://github.com/irvan-putra/tindak">tindak</a></footer>
+</main>
+</body>
+</html>
