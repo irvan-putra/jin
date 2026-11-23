@@ -83,6 +83,20 @@ Portal-check leftovers for deploy day: exact DB DSN/TLS flags, DB minimum
 cost, bucket endpoint/key behavior, and whether a masked secret-env type
 exists (plain env assumed).
 
+## Updating the service (learned on first redeploy, 2026-11-23)
+
+NEO's default rolling update cannot replace this single-writer service.
+The new pod's readiness waits on the old pod's database lease, which the
+old pod never releases while alive, so a rolling update crash-loops the
+new image. Updates must stop the service fully, then start the desired
+image (a recreate strategy). The lease heartbeat keeps the stop-then-
+start gap short: a stopped pod's lease expires within the 90 s TTL.
+
+Deployment tooling caveat: a rolloutReady-style check that counts Ready
+pods is misleading here - it counts the OLD pod. Confirm the new image
+tag is actually serving after an update, not just that something is
+Ready.
+
 ## Durability caveat
 
 Configuring a database or bucket is not proof the provider retains data
