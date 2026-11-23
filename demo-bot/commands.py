@@ -8,7 +8,7 @@ MAX_CHATS = 200
 
 HELP = (
     "Jin demo bot. Not private: anyone with the invite can talk to it, and "
-    "replies can be slow (it checks for messages every few minutes).\n"
+    "replies take 1-2 days, sometimes longer (it checks once a day).\n"
     "Each chat has its own small list.\n"
     "add <text>  - add an item\n"
     "list        - show items\n"
@@ -53,6 +53,6 @@ def handle(lists, chat_key, text):
     if cmd == "clear":
         lists.pop(chat_key, None)
         return "Cleared."
-    if cmd in ("help", "hi", "hello", "start", "/help"):
+    if cmd in ("help", "/help"):
         return HELP
-    return "I did not understand that. Send help."
+    return "Echo: " + t[:2000]

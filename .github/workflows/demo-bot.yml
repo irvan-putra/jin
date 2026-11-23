@@ -9,7 +9,7 @@ name: demo bot
 # this repository.
 on:
   schedule:
-    - cron: "4-59/10 * * * *"
+    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       provision:
@@ -63,6 +63,9 @@ jobs:
         if: ${{ steps.unseal.outputs.have == 'false' && !(github.event_name == 'workflow_dispatch' && inputs.provision) }}
         run: |
           echo "::warning::No saved state. Not creating a new account automatically (it would change the invite). Run this workflow by hand with provision=true."
+      - name: Refresh public demo invite and check saved state
+        if: ${{ steps.unseal.outputs.have == 'true' }}
+        run: python demo-bot/demo_bot.py inspect
       - name: Answer messages
         if: ${{ steps.unseal.outputs.have == 'true' }}
         env:

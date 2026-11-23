@@ -38,10 +38,28 @@ def provision(state_dir):
         acct.add_transport_from_qr("dcaccount:" + RELAY)
         if not acct.is_configured():
             raise SystemExit("relay did not configure the account")
-        acct.set_config("displayname", "Jin demo bot (not private)")
+        acct.set_config("displayname", "Jin demo (public)")
         acct.set_config("bot", "1")
         print("ADDR", _addr(acct))
         print("QR", acct.get_qr_code())
+    finally:
+        rpc.close()
+
+
+def inspect(state_dir):
+    """Public invite and non-private counts only. Never log account secrets."""
+    rpc, dc = _open(state_dir)
+    try:
+        acct = next(a for a in dc.get_all_accounts() if a.is_configured())
+        acct.set_config("displayname", "Jin demo (public)")
+        print("QR", acct.get_qr_code())
+        try:
+            lists = json.load(open(_lists_path(state_dir)))
+        except (OSError, ValueError):
+            lists = {}
+        print("Saved state: %d chats, %d items" % (len(lists), sum(map(len, lists.values()))))
+        if any("buy milk" in items for items in lists.values()):
+            print("Prior synthetic round-trip item preserved: PASS")
     finally:
         rpc.close()
 
@@ -113,7 +131,9 @@ if __name__ == "__main__":
     os.makedirs(state, exist_ok=True)
     if mode == "provision":
         provision(state)
+    elif mode == "inspect":
+        inspect(state)
     elif mode == "run":
         run(state, int(os.environ.get("MIN_S", "45")), int(os.environ.get("MAX_S", "150")))
     else:
-        raise SystemExit("usage: demo_bot.py provision|run")
+        raise SystemExit("usage: demo_bot.py provision|inspect|run")

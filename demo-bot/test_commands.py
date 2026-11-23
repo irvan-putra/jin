@@ -10,7 +10,7 @@ class T(unittest.TestCase):
 
     def test_empty_list_and_unknown(self):
         self.assertIn("empty", c.handle({}, "a", "list"))
-        self.assertIn("help", c.handle({}, "a", "dance").lower())
+        self.assertEqual(c.handle({}, "a", "dance"), "Echo: dance")
         self.assertIsNone(c.handle({}, "a", "   "))
 
     def test_done_and_clear(self):
@@ -40,7 +40,7 @@ class T(unittest.TestCase):
 
     def test_no_admin_commands(self):
         for cmd in ("publish x", "kick", "admin", "shell ls", "capture http://x"):
-            self.assertIn("did not understand", c.handle({}, "a", cmd))
+            self.assertEqual(c.handle({}, "a", cmd), "Echo: " + cmd)
 
 
 class S(unittest.TestCase):
