@@ -1,0 +1,1696 @@
+"""LIVE bot runtime (scratch 0.3 r12). NETWORK code path - separate from bot_validation.py.
+
+TRUST MODEL:
+  - Delta Chat's contact/invitation flow IS the boundary: only people the
+    user gives the bot's invitation QR can reach the bot at all. ANY chat
+    that arrives ACCEPTED under core semantics is served, whoever added the
+    bot: a group gets its own shared list, a 1:1 DM gets a personal list.
+    NO chat-approval ceremony and NO owner identity on the DeltaChat side.
+    Contact requests stay refused - that is core's own boundary.
+  - ALL management is app-side (this Android app, which holds the bot
+    profile): provisioning, the invitation QR, and PUBLISHING new .xdc
+    versions (the activity writes PUBLISH_REQ; the live loop fans the file
+    out to every served chat). No chat-originated input can publish or
+    administer: the per-chat v6.1 gates are built with owner_addr=None, so
+    their DM command surface refuses everyone by construction.
+  - LIST ISOLATION: each served chat gets its OWN OpsStore (ops-<id>.db),
+    its OWN bot-generated stable list id, and its OWN v6.1 gate/bridge.
+    Histories never mix across chats.
+  - REMOVAL: when the core records the bot removed from a chat (any actor),
+    the chat leaves scope - access pauses. The list id, registrations and
+    store file are all KEPT; re-adding the bot to the same chat resumes the
+    same list (core chat ids are grpid-keyed, stable across remove/re-add).
+    The bot never deletes data.
+
+Setup order: 1 probe, 2 create account, 3 start bot, 4 show the invitation
+QR. Whoever gets the QR adds the bot to a group or messages it directly;
+the bot accepts and serves. Publishing: the user picks a .xdc in the app;
+every served chat gets its packed copy (v6.1 headline flow, per-chat).
+Conflicting pre-pinned bundles are refused per chat by reviewed v6.1 code
+(pack_list_identity), never repinned.
+
+Attachment downloads have ONE completion path: v6.1's own persisted
+download reconciler (BridgeBot). The wrapper does NOT intercept attachments.
+
+Custody: profile (bot's own keys) only in the app's private files dir;
+android:allowBackup="false". Uninstall/wipe = identity loss. ops-*.db are
+the only full per-chat op histories.
+
+Relay facts (public source: nine.testrun.org/info.html + /privacy.html):
+free, no signup; 60 msgs/min; 700M storage; messages deleted latest 20 days
+after arrival (transport, not archive).
+"""
+import hashlib
+import json
+import logging
+import os
+import re
+import secrets
+import threading
+import time
+import zipfile
+
+log = logging.getLogger("bot_runtime")
+
+RELAY = "nine.testrun.org"
+
+
+def _account_addr(acct):
+    """Address of a configured account.
+
+    Core deprecated the "addr" config key (multi-transport, 2026-04): after
+    add_transport_from_qr the address lives in the transport list, and
+    get_config("addr") returns None. Read list_transports() first; fall back
+    to the legacy key for older cores.
+    """
+    for t in acct.list_transports() or []:
+        addr = (t or {}).get("addr")
+        if addr:
+            return addr
+    return acct.get_config("addr")
+STATE_FILE = "bot_state.json"
+STOP_FLAG = "STOP"      # written by the Java service on stop; watchdog exits
+RUN_LOCK = "RUNNING"    # single-run lock, removed on clean exit
+INVITE_REQ = "INVITE_REQ"    # written by the activity; live loop answers it
+INVITE_DONE = "INVITE_DONE"  # written by the live loop when invite.svg is fresh
+PUBLISH_REQ = "PUBLISH_REQ"    # activity writes basename of a .xdc in files_dir
+PUBLISH_DONE = "PUBLISH_DONE"  # live loop writes the publish result JSON
+PUBLISH_PROG = "PUBLISH_PROG"  # per-chat progress for crash-resume (sha-keyed)
+# state keys: provisioned, bot_addr, chats {str(chat_id): {"list_id": str}}
+# (legacy owner_* keys from pre-r12 state are ignored, never read)
+
+
+def _parse_membership(text, bot_addr):
+    """(action, affected, actor) from a membership system-message text.
+
+    The client's parse_system_add_remove covers the third-person stock
+    forms ("Member X added by Y", "You added member X", "Group left by
+    Y") but NOT the SELF-perspective forms core 2.69 emits when the BOT is
+    the affected member (stock_str.rs MsgAddedBy=180 / MsgAdded=182 /
+    MsgRemovedBy=179 / MsgRemoved=181):
+        "You were added by <actor>."     "You were added."
+        "You were removed by <actor>."   "You were removed."
+    The bot being added to a group is exactly the self case. r12: adds no
+    longer gate anything (any accepted chat is served); the scan's only
+    remaining job is REMOVAL detection (a recorded removal of the bot, any
+    actor, revokes the chat). actor=None means core did not record the
+    adder (e.g. unencrypted group).
+    The actor slot carries a display name + address ("Name (addr)") when
+    the actor is a known contact; extract_addr handles both forms.
+    """
+    from deltachat_rpc_client._utils import extract_addr, parse_system_add_remove
+    parsed = parse_system_add_remove(text)
+    if parsed:
+        return parsed
+    t = (text or "").strip().lower()
+    m = re.match(r"you were (added|removed) by (.+)$", t)
+    if m:
+        action, actor = m.groups()
+        return action, (bot_addr or "me"), extract_addr(actor)
+    m = re.match(r"you were (added|removed)\.?$", t)
+    if m:
+        return m.group(1), (bot_addr or "me"), None
+    return None
+
+
+# --- structural membership attribution (rev9.3) ---------------------------
+# Evidence base (core v2.69.0 source):
+#  - mimeparser.rs: a Chat-Group-Member-Added/Removed header sets
+#    SystemMessage MemberAddedToGroup=4 / MemberRemovedFromGroup=5.
+#  - receive_imf.rs: the membership message is inserted with Param::Cmd,
+#    Param::ContactAddedRemoved (affected contact id) and from_id = the
+#    actor; an EMPTY better_msg sends the whole message to ChatId::TRASH
+#    instead of the chat (no visible info message), and implicit
+#    member-list reconciliation adds SELF silently (no info message).
+#  - message.rs: is_info = from/to INFO or cmd != Unknown;
+#    get_info_contact_id reads ContactAddedRemoved; ContactId::SELF == 1;
+#    load_from_db has `AND chat_id!=3` - TRASHED MESSAGES ARE UNREADABLE
+#    through the public message API, so trashed evidence cannot be
+#    recovered client-side (get_message_ids(3) lists ids, get_message
+#    refuses each).
+# So text parsing CANNOT be the primary mechanism: the visible text may be
+# absent (trashed) or carry only a display name. Structure first, text as
+# fallback for old cores.
+SELF_CONTACT_ID = 1
+SPECIAL_CONTACT_IDS = {1, 2, 5}   # SELF, INFO, DEVICE
+_CMD_ACTION = {"MemberAddedToGroup": "added",
+               "MemberRemovedFromGroup": "removed"}
+_STOCK_WORDS = frozenset("""
+you were added removed by member group left the a to from image changed
+deleted name description messages are end-to-end encrypted me your
+""".split())
+
+
+def _redact_template(text):
+    """Stock-string TEMPLATE with addresses/names hidden, for on-screen logs."""
+    t = re.sub(r"\S+@\S+", "[e]", (text or "").strip().lower())
+    out = []
+    for tok in t.split():
+        core = tok.strip(".,!\"'")
+        # keep ONLY stock words and punctuation: a numeric/symbol contact
+        # name (e.g. a phone number) must not leak into the screenshot log
+        out.append(tok if (core in _STOCK_WORDS
+                           or not any(ch.isalnum() for ch in core))
+                   else "[w]")
+    return " ".join(out)[:60]
+
+
+def _state_path(files_dir):
+    return os.path.join(files_dir, STATE_FILE)
+
+
+def load_state(files_dir):
+    try:
+        with open(_state_path(files_dir)) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_state(files_dir, **kw):
+    # atomic: never leave a half-written state file after a crash mid-save
+    st = load_state(files_dir)
+    st.update(kw)
+    tmp = _state_path(files_dir) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(st, f)
+    os.replace(tmp, _state_path(files_dir))
+    return st
+
+
+def _rpc(native_lib_dir, files_dir):
+    from deltachat_rpc_client import DeltaChat, Rpc
+    rpc = Rpc(accounts_dir=os.path.join(files_dir, "accounts"),
+              rpc_server_path=os.path.join(native_lib_dir, "librpcsrv.so"))
+    rpc.start()
+    return rpc, DeltaChat(rpc)
+
+
+def provision(native_lib_dir, files_dir):
+    """One-time: create the bot's OWN chatmail account. Explicitly network-using."""
+    rpc, dc = _rpc(native_lib_dir, files_dir)
+    try:
+        accounts = dc.get_all_accounts()
+        configured = [a for a in accounts if a.is_configured()]
+        if configured:
+            addr = _account_addr(configured[0])
+            if not addr:
+                raise RuntimeError("existing account has no readable transport address")
+            gen = load_state(files_dir).get("acct_gen") or int(time.time())
+            save_state(files_dir, provisioned=True, bot_addr=addr, acct_gen=gen)
+            return addr
+        if accounts:
+            # Existing profile in an unconfigured/uncertain state: re-running
+            # QR onboarding would mint a NEW relay identity. Refuse loudly so
+            # recovery never creates a duplicate server-side account.
+            raise RuntimeError(
+                "found %d existing profile(s) but none is configured; "
+                "refusing to re-onboard (would mint a new relay identity) - "
+                "manual review needed" % len(accounts))
+        acct = dc.add_account()
+        acct.add_transport_from_qr(f"dcaccount:{RELAY}")
+        if not acct.is_configured():
+            raise RuntimeError("relay did not configure the account")
+        addr = _account_addr(acct)
+        if not addr:
+            raise RuntimeError("account configured but its address is unreadable")
+        save_state(files_dir, provisioned=True, bot_addr=addr,
+                   acct_gen=int(time.time()))
+        log.info("bot account created: %s", addr)
+        return addr
+    finally:
+        rpc.close()
+
+
+def _account(dc):
+    for a in dc.get_all_accounts():
+        if a.is_configured():
+            return a
+    raise RuntimeError("no configured account - run provision() first")
+
+
+def read_list_identity(xdc_path):
+    """Read-only list.json identity from a bundle. None if absent."""
+    try:
+        with zipfile.ZipFile(xdc_path) as z:
+            if "list.json" not in z.namelist():
+                return None
+            data = json.loads(z.read("list.json").decode())
+            lid = data.get("list_id") if isinstance(data, dict) else None
+            return lid if isinstance(lid, str) and lid else None
+    except Exception as e:
+        log.warning("list.json unreadable in %s: %s", xdc_path, e)
+        return None
+
+
+class ChatRuntime:
+    """One isolated v6.1 stack per served chat: own store, id, gate, bridge.
+
+    owner_addr is ALWAYS None (r12): there is no DeltaChat-side privileged
+    identity; the gate's DM command surface therefore refuses everyone and
+    publishing only happens app-side via publish_and_restore."""
+
+    def __init__(self, account, files_dir, chat_id, list_id, bot_addr):
+        from ops_store import OpsStore
+        from delivery_bot import DeliveryBot
+        from bot import BridgeBot
+        self.chat_id = chat_id
+        store = OpsStore(os.path.join(files_dir, "ops-%d.db" % chat_id))
+        self.gate = DeliveryBot(account, store, owner_addr=None,
+                                allowed_chat_ids={chat_id}, list_id=list_id,
+                                bot_addr=bot_addr)
+        self.bridge = BridgeBot(account, store, self.gate)
+
+
+class ChatControl:
+    """Wrapper owning trust decisions around the per-chat v6.1 stacks.
+
+    r12: no owner concept at all - every
+    accepted chat is served with an isolated stack; management (provisioning,
+    invitation QR, publishing) is app-side only.
+
+    Uses ONLY the public rpc-client surface (Account.get_chatlist, Chat,
+    Contact.get_snapshot, Message.get_snapshot), no raw rpc calls."""
+
+    def __init__(self, account, files_dir):
+        self.account = account
+        self.files_dir = files_dir
+        self.bot_addr = _account_addr(account)
+        self.runtimes = {}        # chat_id -> ChatRuntime
+
+    def _st(self):
+        return load_state(self.files_dir)
+
+    @staticmethod
+    def _chat_type(chat):
+        try:
+            return str(chat.get_basic_snapshot().get("chat_type", ""))
+        except Exception:
+            return ""
+
+    def _served_chat_ids(self):
+        return {int(k) for k, rec in self._st().get("chats", {}).items()
+                if not rec.get("revoked")}
+
+    def _membership_scan(self, chat_id):
+        """Structural membership scan of a chat's visible messages.
+
+        Returns (events, first_visible_ts, n_scanned, n_info). Each event:
+        {"action", "affected"("self"/"other"/"unknown"), "actor"(addr|None),
+         "ts", "basis"("cmd"/"text"), "tmpl"}. Trashed messages are
+        unreachable by design (message.rs load_from_db excludes chat 3),
+        so only visible evidence can ever attribute."""
+        from deltachat_rpc_client import Chat, Contact
+        events, n_scanned, n_info = [], 0, 0
+        first_visible_ts = None
+        idx = 0   # chat-order tiebreak when snapshots lack timestamps
+
+        def scan(cid, loc):
+            nonlocal first_visible_ts, n_scanned, n_info, idx
+            try:
+                msgs = Chat(self.account, cid).get_messages()
+            except Exception as e:
+                log.info("membership scan: %s chat %s unreadable: %s",
+                         loc, cid, e)
+                return
+            for m in msgs:
+                try:
+                    snap = m.get_snapshot()
+                except Exception:
+                    continue
+                n_scanned += 1
+                idx += 1
+                ts = snap.get("sort_timestamp") or snap.get("timestamp") or 0
+                if loc == "chat" and (first_visible_ts is None
+                                      or ts < first_visible_ts):
+                    first_visible_ts = ts
+                cmd = str(snap.get("system_message_type") or "")
+                action = _CMD_ACTION.get(cmd)
+                text = snap.get("text", "") or ""
+                if action:
+                    icid = snap.get("info_contact_id")
+                    affected = ("self" if icid == SELF_CONTACT_ID
+                                else ("other" if icid else "unknown"))
+                    actor = None
+                    from_id = snap.get("from_id")
+                    if from_id and from_id not in SPECIAL_CONTACT_IDS:
+                        try:
+                            actor = (Contact(self.account, from_id)
+                                     .get_snapshot().get("address"))
+                        except Exception:
+                            actor = None
+                    events.append({"action": action, "affected": affected,
+                                   "actor": actor, "ts": ts, "idx": idx,
+                                   "basis": "cmd",
+                                   "tmpl": _redact_template(text)})
+                elif snap.get("is_info"):
+                    n_info += 1
+                    parsed = _parse_membership(text, self.bot_addr)
+                    if parsed:
+                        action, aff, actor = parsed
+                        affected = ("self" if aff and self.bot_addr and
+                                    aff.lower() in (self.bot_addr.lower(), "me")
+                                    else "other")
+                        events.append({"action": action, "affected": affected,
+                                       "actor": actor, "ts": ts, "idx": idx,
+                                       "basis": "text",
+                                       "tmpl": _redact_template(text)})
+        scan(chat_id, "chat")
+        return events, first_visible_ts, n_scanned, n_info
+
+    def _bot_add_actor(self, chat_id):
+        """(action, actor) of the LATEST membership change affecting the bot,
+        or None. Structural first (cmd + ContactAddedRemoved + from_id);
+        stock-text parse only as fallback for old cores. STRICT boundary:
+        only events the core explicitly marks as affecting SELF count;
+        unknown-affected events (core dropped the member param, or the add
+        was trashed/silent) REFUSE - missing proof never becomes a serve.
+        Every decision logs its basis; refusals dump the redacted evidence
+        for the on-screen log."""
+        events, first_ts, n_scanned, n_info = self._membership_scan(chat_id)
+        strong = [e for e in events if e["affected"] == "self"]
+        if strong:
+            latest = max(strong, key=lambda e: (e["ts"], e["idx"]))
+            log.info("chat %s membership: %s by %s (basis %s, %d scanned)",
+                     chat_id, latest["action"],
+                     latest["actor"] or "no-actor", latest["basis"],
+                     n_scanned)
+            return latest["action"], latest["actor"]
+        log.info("chat %s membership: no attributable add (%d scanned, "
+                 "%d other-info)", chat_id, n_scanned, n_info)
+        for e in sorted(events, key=lambda e: (e["ts"], e["idx"]))[-4:]:
+            log.info("chat %s ev %s affected=%s actor=%s tmpl=%r",
+                     chat_id, e["action"], e["affected"],
+                     "set" if e["actor"] else "none", e["tmpl"])
+        return None
+
+    def _serve_chat(self, chat):
+        """Trust model: the QR is the boundary - ANY chat
+        that arrives accepted under core semantics is served, whoever added
+        the bot (contact requests are refused by the caller). No owner gate
+        on chatting; management is app-side only.
+
+        Accepts (once), generates the chat's own stable list id, persists it,
+        builds the chat's isolated v6.1 stack.
+
+        RE-ADD CONTINUITY: a chat the bot was removed from keeps its state
+        entry (revoked) and its store file; re-serving the SAME core chat
+        reuses the existing list id and store, so the group's list data and
+        instance registrations continue - removal pauses access, it never
+        resets the list. (Core chat ids are grpid-keyed and stable across
+        remove/re-add: receive_imf.rs routes group messages via
+        get_chat_id_by_grpid, reusing the existing chat row.)"""
+        from deltachat_rpc_client import Chat
+        st = self._st()
+        chats = dict(st.get("chats", {}))
+        key = str(chat.id)
+        if key not in chats:
+            try:
+                Chat(self.account, chat.id).accept()
+            except Exception as e:
+                log.warning("accept failed for chat %s: %s", chat.id, e)
+                return None
+            chats[key] = {"list_id": "list-" + secrets.token_hex(8)}
+            save_state(self.files_dir, chats=chats)
+            log.info("now serving chat %s (accepted; isolated store "
+                     "+ list %s)", chat.id, chats[key]["list_id"])
+        elif chats[key].get("revoked"):
+            chats[key] = {"list_id": chats[key]["list_id"]}
+            save_state(self.files_dir, chats=chats)
+            log.info("resumed serving chat %s (re-added; existing list %s "
+                     "and store continue)", chat.id, chats[key]["list_id"])
+        return self._runtime_for(chat.id, chats[key]["list_id"])
+
+    @staticmethod
+    def _ver_tuple(v):
+        """(1,4,2) from "1.4.2"; None when unparseable (then no ordering
+        claims are made - heal falls back to plain presence check)."""
+        try:
+            parts = [int(p) for p in str(v).strip().lstrip("v").split(".")]
+            return tuple(parts) if parts else None
+        except (TypeError, ValueError):
+            return None
+
+    def _maybe_heal(self, chat_id):
+        """Lazy per-chat self-healing (idea adapted from the public
+        PixelSocial bot; our machinery, NO delete-old and NO downgrade):
+
+        If the app has a current published version (state.current_app, set
+        by app-side publishing) and this SERVED chat has no registered
+        instance of it, deliver the current .xdc into THIS chat only via the
+        v6.1 headline flow (packed with the chat's own list id, registered
+        bot-origin, FULL canonical ops replay - not PixelSocial's
+        100-recent-posts approximation). Old instances are never deleted; a
+        chat already on a NEWER version is left alone (no downgrade).
+        """
+        st = self._st()
+        app = st.get("current_app") or {}
+        version = app.get("version")
+        if not version or chat_id not in self._served_chat_ids():
+            return
+        rt = self.runtimes.get(chat_id)
+        if rt is None:
+            return
+        versions = [i.get("version") for i in rt.gate._instances.values()
+                    if i.get("chat_id") == chat_id]
+        if version in versions:
+            return  # chat is current
+        cur, want = self._ver_tuple(version), None
+        for v in versions:
+            tv = self._ver_tuple(v)
+            if tv is not None and (want is None or tv > want):
+                want = tv
+        if cur is not None and want is not None and want > cur:
+            log.info("chat %s on newer app v%s than current v%s; not healing",
+                     chat_id, want, version)
+            return
+        path = os.path.join(self.files_dir, app.get("file", ""))
+        if not os.path.exists(path):
+            log.warning("current app file %r missing; cannot heal chat %s",
+                        app.get("file"), chat_id)
+            return
+        from deltachat_rpc_client import Chat
+        try:
+            msg, sent = rt.gate.publish_and_restore(
+                Chat(self.account, chat_id), path, rt.bridge.send_update)
+            log.info("healed chat %s to app v%s (msg %s, %d ops replayed)",
+                     chat_id, version, msg.id, sent)
+        except Exception as e:
+            log.warning("heal failed for chat %s: %s", chat_id, e)
+
+    def _revoke_chat(self, chat_id):
+        """The bot was removed from the chat (any actor) -> out of scope.
+        PAUSES access only: the state entry is kept (marked revoked), the
+        list id is preserved for a later re-add, and the chat's store file
+        stays on disk untouched (the bot never deletes data)."""
+        st = self._st()
+        chats = dict(st.get("chats", {}))
+        key = str(chat_id)
+        if key in chats and not chats[key].get("revoked"):
+            chats[key] = {"list_id": chats[key]["list_id"], "revoked": True}
+            save_state(self.files_dir, chats=chats)
+        self.runtimes.pop(chat_id, None)
+        log.info("chat %s revoked: bot removed (list kept for re-add)",
+                 chat_id)
+
+    def _runtime_for(self, chat_id, list_id):
+        rt = self.runtimes.get(chat_id)
+        if rt is None:
+            rt = ChatRuntime(self.account, self.files_dir, chat_id, list_id,
+                             self.bot_addr)
+            self.runtimes[chat_id] = rt
+        return rt
+
+    def boot_runtimes(self):
+        """(Re)build stacks for all served chats; call after start_io."""
+        st = self._st()
+        # revoke pass: a served chat the bot has since been removed from
+        # leaves scope before any runtime is rebuilt
+        for key in list(st.get("chats", {}).keys()):
+            membership = self._bot_add_actor(int(key))
+            if membership and membership[0] == "removed":
+                self._revoke_chat(int(key))
+        # resume pass: a revoked chat the bot was re-added to while offline
+        # (scan shows a fresh add) resumes with its preserved list id. When
+        # the scan is silent, live traffic resumes it on the next message.
+        for key, rec in list(self._st().get("chats", {}).items()):
+            if rec.get("revoked"):
+                membership = self._bot_add_actor(int(key))
+                if membership and membership[0] == "added":
+                    from deltachat_rpc_client import Chat as _C
+                    self._serve_chat(_C(self.account, int(key)))
+        # discovery pass: accepted group chats that arrived while the bot was
+        # offline (requests refused here exactly as in live dispatch; 1:1 DMs
+        # are served lazily on their next message). REVOKED chats are NOT
+        # resumed here without evidence - they resume via the resume pass
+        # above (scan shows a re-add) or on live traffic.
+        known = set(self._st().get("chats", {}))
+        for chat in self.account.get_chatlist():
+            if self._chat_type(chat) == "Single":
+                continue
+            if str(chat.id) in known:
+                continue
+            if self._is_request(self.account, chat.id):
+                continue
+            self._serve_chat(chat)
+        for key, rec in self._st().get("chats", {}).items():
+            if rec.get("revoked"):
+                continue
+            rt = self._runtime_for(int(key), rec["list_id"])
+            rt.bridge.reconcile_on_boot()  # needs IO; resumes downloads/publishes
+            self._maybe_heal(int(key))  # catch up chats that missed a publish
+
+    def _all_bridges(self):
+        return list(self.runtimes.values())
+
+    def on_status_update(self, event):
+        for rt in self._all_bridges():
+            rt.bridge.on_status_update(event)
+
+    def on_msgs_changed(self, event):
+        for rt in self._all_bridges():
+            rt.bridge.on_msgs_changed(event)
+
+    @staticmethod
+    def _is_request(account, chat_id):
+        from deltachat_rpc_client import Chat
+        try:
+            snap = Chat(account, chat_id).get_basic_snapshot()
+            return bool(snap.get("is_contact_request"))
+        except Exception:
+            return True  # unknown -> treat as request -> ignore
+
+    def _capture_route_handle(self, event):
+        """Bidik capture route (capture_route.py). Returns True when the
+        message is consumed (all traffic from the paired peer: results are
+        routed back to requester chats, and the peer DM must never become
+        a served list). Capture COMMANDS in served chats are not consumed:
+        bridge ingest continues and the route replies alongside."""
+        import capture_route
+        snap = event.message_snapshot
+        text = snap.get("text") or ""
+        st = load_state(self.files_dir)
+        peer = st.get("bidik_peer_addr")
+        sender = None
+        from_id = snap.get("from_id")
+        if from_id:
+            from deltachat_rpc_client import Contact
+            try:
+                sender = Contact(self.account, from_id).get_snapshot().get("addr")
+            except Exception:
+                sender = None
+        from_peer = bool(peer and sender and sender.lower() == peer.lower())
+        is_served = snap.chat_id in self._served_chat_ids()
+        if not from_peer and not (
+                is_served and text.strip().lower().startswith("capture")):
+            return False
+        acts = capture_route.handle_incoming(
+            st, sender, snap.chat_id, text, is_served)
+        save_state(self.files_dir, **{
+            capture_route.RouteTable.KEY: st.get(
+                capture_route.RouteTable.KEY, {}),
+            capture_route.FILE_ROUTE_KEY: st.get(capture_route.FILE_ROUTE_KEY),
+            "capture_results_seen": st.get("capture_results_seen", [])})
+        from deltachat_rpc_client import Chat
+        for a in acts:
+            kind = a["action"]
+            if kind in ("reply", "forward_status"):
+                Chat(self.account, a["chat_id"]).send_text(a["text"])
+            elif kind == "forward_file":
+                f = snap.get("file")
+                if f:
+                    Chat(self.account, a["chat_id"]).send_message(
+                        text=a["caption"], file=f)
+            elif kind == "send_queue":
+                self.account.create_contact(peer).create_chat().send_text(a["text"])
+        return from_peer
+
+    def on_new_message(self, event):
+        snap = event.message_snapshot
+        chat_id = snap.chat_id
+
+        # 0) Bidik capture route: peer traffic is consumed here; capture
+        #    commands in served chats reply alongside normal ingest.
+        if self._capture_route_handle(event):
+            return
+
+        # 1) served chat traffic -> that chat's bridge only. An info
+        #    message can also record the bot's removal: revoke live.
+        if chat_id in self._served_chat_ids():
+            rt = self.runtimes.get(chat_id)
+            if rt is not None:
+                rt.bridge.on_new_message(event)
+                self._maybe_heal(chat_id)
+            if snap.get("is_info"):
+                membership = self._bot_add_actor(chat_id)
+                if membership and membership[0] == "removed":
+                    self._revoke_chat(chat_id)
+            return
+
+        # 2) contact requests are ignored: no ingest, no reply, no accept
+        #    (core's own boundary - the only refusal left).
+        if self._is_request(self.account, chat_id):
+            return
+
+        # 3) any accepted chat is served (trust model: the QR is
+        #    the boundary - anyone holding it may chat with the bot, in a
+        #    group or directly). Groups get their own shared list; a 1:1 DM
+        #    gets a personal list. Every stack is isolated (own store, own
+        #    list id): histories never mix across chats.
+        for chat in self.account.get_chatlist():
+            if chat.id == chat_id:
+                rec = self._st().get("chats", {}).get(str(chat_id))
+                if rec and rec.get("revoked"):
+                    # REVIEWER GAP FIX: a revoked chat must not be resumed
+                    # by a late in-flight straggler message. Access resumes
+                    # only on a grounded rejoin signal - the latest self-add
+                    # info message (the same evidence the boot resume pass
+                    # uses). Core limit: a SILENT re-add (core adds self
+                    # with no add-info message) carries no evidence, so the
+                    # chat then stays paused until boot or a visible re-add.
+                    membership = self._bot_add_actor(chat_id)
+                    if not (membership and membership[0] == "added"):
+                        log.info("chat %s revoked; straggler message ignored "
+                                 "(no re-add evidence)", chat_id)
+                        return
+                rt = self._serve_chat(chat)
+                if rt is not None:
+                    rt.bridge.on_new_message(event)
+                return
+
+def _invite_watcher(files_dir, acct):
+    """Answer the activity's INVITE_REQ with the SecureJoin setup-contact
+    QR (SVG + text) of the RUNNING account - the only rpc owner. The QR
+    text is a bearer invitation: never log it."""
+    req = os.path.join(files_dir, INVITE_REQ)
+    done = os.path.join(files_dir, INVITE_DONE)
+    flag = os.path.join(files_dir, STOP_FLAG)
+    while not os.path.exists(flag):
+        time.sleep(1)
+        if not os.path.exists(req):
+            continue
+        try:
+            try:
+                qr_text, svg = acct.get_qr_code_svg()
+            except Exception:
+                qr_text, svg = acct.get_qr_code(), None
+            with open(os.path.join(files_dir, "invite.txt"), "w") as f:
+                f.write(qr_text)
+            if svg:
+                with open(os.path.join(files_dir, "invite.svg"), "w") as f:
+                    f.write(svg)
+            with open(done, "w") as f:
+                f.write(str(time.time()))
+            log.info("invitation QR written on request (contents not logged)")
+        except Exception as e:
+            log.warning("invitation QR failed: %s", e)
+        try:
+            os.unlink(req)
+        except OSError:
+            pass
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _load_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _app_publish(files_dir, control, name, request=None):
+    """Fan the named .xdc (basename in the app-private dir) out to every
+    SERVED (non-revoked) chat. Crash-resumable and retry-deduplicating BY
+    FILE CONTENT:
+
+    - PUBLISH_PROG records per-chat completion keyed by the file's sha256;
+      a process crash mid-fanout resumes the remaining chats on the next
+      run instead of starting over.
+    - A user retry after a COMPLETED run (e.g. some chats errored) skips
+      the chats already published for these exact bytes (PUBLISH_DONE is
+      consulted the same way) and re-attempts only the rest.
+    - The one remaining duplicate window is a crash between a chat's
+      send_message and its progress write; that chat would get a second
+      webxdc bubble. Data impact of even that: none - both instances carry
+      the same packed list id, registration is additive, and the store's
+      canonical-op dedup makes ops from either instance apply once.
+    """
+    result = {"published": {}, "errors": {}, "skipped": {}, "partial": {},
+              "file": name, "request": request}
+    if (not name or "/" in name or name in (".", "..")
+            or not name.lower().endswith(".xdc")):
+        result["errors"]["*"] = "bad publish request name %r" % name
+        return result
+    path = os.path.join(files_dir, name)
+    if not os.path.exists(path):
+        result["errors"]["*"] = "no such file in app dir: %s" % name
+        return result
+    sha = _sha256(path)
+    prog_path = os.path.join(files_dir, PUBLISH_PROG)
+    done_path = os.path.join(files_dir, PUBLISH_DONE)
+    prog = _load_json(prog_path)
+    if prog.get("sha256") != sha:
+        prog = {"sha256": sha, "file": name, "done": [], "request": request}
+    if request is None:
+        # crash resume: recover the ORIGINAL request token from the
+        # checkpoint so the UI still correlates the final DONE to the
+        # request it sent (a resumed run has no REQ file to re-read)
+        request = prog.get("request")
+        result["request"] = request
+    elif prog.get("request") != request:
+        prog["request"] = request
+    already = set(prog.get("done", []))
+    prior = _load_json(done_path)
+    if prior.get("sha256") == sha:
+        already |= set(prior.get("published", {}))
+        result["skipped"] = {k: prior["published"][k]
+                             for k in prior.get("published", {})}
+    from deltachat_rpc_client import Chat
+    from delivery_bot import CandidateUncertainError, parse_manifest_version
+    try:
+        want_version = parse_manifest_version(path)
+    except Exception:
+        want_version = None  # the per-chat publish_version call refuses it
+    for key, rec in control._st().get("chats", {}).items():
+        if key in already or rec.get("revoked"):
+            continue  # revoked = out of scope until re-added
+        cid = int(key)
+        try:
+            rt = control._runtime_for(cid, rec["list_id"])
+            existing = (rt.gate.registered_instance_for(cid, want_version)
+                        if want_version else None)
+            adopted = None
+            if existing is None and want_version:
+                # Upgrade-gap recovery BEFORE any send: an earlier run may
+                # have delivered this exact version's bubble but died before
+                # registration was durable (the r12 crash). Adopting the
+                # chat-local, bot-authored, list-pinned, version-exact
+                # instance preserves the already-edited bubble and avoids a
+                # duplicate. Nothing qualifies -> normal send path below.
+                adopted = rt.gate.adopt_existing_instance(cid, want_version)
+            if adopted is not None:
+                # Strict one-shot adoption ingest BEFORE replay: pull the
+                # adopted instance's full pre-adoption history into the
+                # store (its watermark starts at 0), so edits made while
+                # it was orphaned become canonical and join this replay
+                # and all future ones. A failure leaves the queued ingest
+                # for the drain/boot retry; it never blocks the replay.
+                ingest_pending = False
+                try:
+                    rt.bridge.process_instance(adopted)
+                    rt.gate.ingest_done(adopted)
+                except Exception:
+                    log.exception("adoption ingest of %s failed; left queued",
+                                  adopted)
+                    ingest_pending = True
+                try:
+                    sent = rt.gate.restore_into(adopted, rt.bridge.send_update)
+                except Exception as e:
+                    result["partial"][key] = {"msg_id": adopted,
+                                              "error": str(e)}
+                    continue
+                result["published"][key] = {"msg_id": adopted,
+                                            "ops_replayed": sent,
+                                            "adopted": True}
+                if ingest_pending:
+                    # Replay succeeded, but the adopted instance's older
+                    # history is still queued for the store - honest flag so
+                    # the UI does not imply the recovery is fully complete.
+                    result["published"][key]["ingest_pending"] = True
+                prog.setdefault("done", []).append(key)
+            elif existing is not None:
+                # This version is ALREADY delivered and registered in the
+                # chat (e.g. a previous run sent the instance but failed
+                # during replay): complete into the EXISTING instance
+                # instead of sending a duplicate bubble for the same bytes.
+                sent = rt.gate.restore_into(existing, rt.bridge.send_update)
+                result["published"][key] = {"msg_id": existing,
+                                            "ops_replayed": sent,
+                                            "existing": True}
+                prog.setdefault("done", []).append(key)
+            else:
+                # send first; if the SEND fails nothing left the device and
+                # the chat stays a plain error.
+                try:
+                    msg = rt.gate.publish_version(Chat(control.account, cid), path)
+                except Exception as e:
+                    result["errors"][key] = str(e)
+                    continue
+                # The instance is sent and registered BEFORE the replay is
+                # attempted; checkpoint that immediately, so a crash or a
+                # replay failure can never cause a duplicate bubble: a retry
+                # of the SAME bytes finds the registration above.
+                prog.setdefault("sent", {})[key] = msg.id
+                tmp = prog_path + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(prog, f)
+                os.replace(tmp, prog_path)  # atomic per-chat send checkpoint
+                try:
+                    sent = rt.gate.restore_into(msg.id, rt.bridge.send_update)
+                except Exception as e:
+                    # Honest third state: delivered but NOT replayed. Not
+                    # prog["done"]: a same-bytes retry finishes the replay
+                    # via the registered-instance path (no duplicate send).
+                    result["partial"][key] = {"msg_id": msg.id,
+                                              "error": str(e)}
+                    continue
+                result["published"][key] = {"msg_id": msg.id,
+                                            "ops_replayed": sent}
+                prog.setdefault("done", []).append(key)
+            tmp = prog_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(prog, f)
+            os.replace(tmp, prog_path)  # atomic per-chat checkpoint
+        except CandidateUncertainError as e:
+            # Fail-closed: a candidate check could not be COMPLETED
+            # (transient RPC/read failure). Never fall through to
+            # adopt-older or to a duplicate send on doubt - report an
+            # explicit retryable error for this chat instead.
+            result["errors"][key] = (
+                "could not verify this chat's existing app bubbles "
+                "(temporary read failure: %s); nothing was sent - publish "
+                "the SAME file again to retry" % e)
+            continue
+        except Exception as e:
+            result["errors"][key] = str(e)
+    result["sha256"] = sha
+    if result["published"] or result["partial"]:
+        # latest-version tracking (idea from the public PixelSocial bot):
+        # remember the app-side-published current version so chats that
+        # missed it (new chat, revoked at the time, relay failure) can be
+        # healed LAZILY per chat. The published file stays in files_dir.
+        from delivery_bot import parse_manifest_version
+        try:
+            version = parse_manifest_version(path)
+        except Exception as e:
+            version = None
+            log.warning("current-app version unreadable in %s: %s", name, e)
+        if version:
+            save_state(files_dir, current_app={
+                "file": name, "sha256": sha, "version": version})
+            result["current_version"] = version
+    # NOTE: PUBLISH_PROG is deleted by the caller only AFTER the result is
+    # durably written (checkpoint-before-delete ordering).
+    return result
+
+
+def _publish_watcher(files_dir, control):
+    """App-side publishing: new app versions are publishable FROM THE
+    ANDROID APP; all bot management is app-side.
+
+    The activity copies the picked .xdc into the app-private files dir and
+    writes PUBLISH_REQ containing its basename; the fan-out (_app_publish)
+    delivers to every served chat and writes PUBLISH_DONE with a per-chat
+    result JSON for the UI. An interrupted fan-out from a previous process
+    (PUBLISH_PROG still present) is resumed once at startup.
+
+    Security: the request file lives in the app-private dir, so only the app
+    can trigger a fan-out. No chat-originated input can ever mass-publish:
+    every gate has owner_addr=None, so its DM command surface refuses
+    everyone."""
+    req = os.path.join(files_dir, PUBLISH_REQ)
+    done = os.path.join(files_dir, PUBLISH_DONE)
+    prog_path = os.path.join(files_dir, PUBLISH_PROG)
+    flag = os.path.join(files_dir, STOP_FLAG)
+    _pending_prog = _load_json(prog_path)
+    pending = (_pending_prog.get("file"), _pending_prog.get("request"))
+    while not os.path.exists(flag):
+        token = None
+        if pending[0]:
+            name, token = pending
+            pending = (None, None)
+        else:
+            time.sleep(1)
+            if not os.path.exists(req):
+                continue
+            try:
+                with open(req) as f:
+                    lines = f.read().splitlines()
+                name = lines[0].strip() if lines else ""
+                # optional second line: activity-generated request token, so
+                # the UI can correlate PUBLISH_DONE to ITS request and never
+                # shows a stale result as a fresh success
+                token = lines[1].strip() if len(lines) > 1 else None
+            except Exception:
+                name = ""
+            try:
+                os.unlink(req)
+            except OSError:
+                pass
+        result = _app_publish(files_dir, control, name, request=token)
+        done_ok = False
+        try:
+            tmp = done + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(result, f)
+            os.replace(tmp, done)  # DONE lands atomically BEFORE...
+            done_ok = True
+        except Exception as e:
+            # keep PUBLISH_PROG: without a durable DONE the checkpoint is
+            # the only record of the run, and the startup resume pass
+            # re-attempts (already-published chats skip via prog["done"])
+            log.warning("publish result write failed: %s; keeping PROG "
+                        "for resume", e)
+        if done_ok:
+            try:
+                os.unlink(prog_path)   # ...the progress checkpoint is deleted
+            except OSError:
+                pass
+        log.info("app-side publish done: %d chat(s) ok, %d failed, %d skipped",
+                 len(result["published"]), len(result["errors"]),
+                 len(result["skipped"]))
+
+
+# --------------------------------------------------------------------------
+# Cross-app transport (contract v1, docs/transport-contract.md): the Android
+# provider authenticates callers and writes SYNC_REQ_<id>; this watcher does
+# the DeltaChat side and answers SYNC_RESP_<id>. All files stay in the
+# app-private dir, exactly like the PUBLISH_REQ bridge.
+
+SYNC_ALIVE = "SYNC_ALIVE"
+SYNC_GRANTS = "SYNC_GRANTS"
+SYNC_PROCESSED = "SYNC_PROCESSED.json"
+SYNC_CHATS = "SYNC_CHATS"
+SYNC_INBOX = "SYNC_INBOX.jsonl"
+SYNC_INBOX_SEQ = "SYNC_INBOX_SEQ"
+SYNC_REFS = "SYNC_REFS"
+STAGE_TTL_S = 600
+
+
+def _sync_decode_handle(handle):
+    import base64
+    try:
+        raw = base64.urlsafe_b64decode(handle + "=" * (-len(handle) % 4))
+        addr, cid, gen = raw.decode().rsplit("|", 2)
+        return addr, int(cid), gen
+    except Exception:
+        return None, None, None
+
+
+def _sync_handles(files_dir, control):
+    import base64
+    st = control._st()
+    gen = st.get("acct_gen", 1)
+    out = []
+    for cid in sorted(control._served_chat_ids()):
+        raw = "%s|%d|g%s" % (control.bot_addr, cid, gen)
+        h = base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+        out.append((h, cid))
+    return out
+
+
+def _sync_chat_names(control):
+    from deltachat_rpc_client import Chat
+    names = {}
+    for _h, cid in _sync_handles(control.files_dir, control):
+        try:
+            snap = Chat(control.account, cid).get_basic_snapshot()
+            names[cid] = snap.get("name") or str(cid)
+        except Exception:
+            names[cid] = str(cid)
+    return names
+
+
+def _sync_grants(files_dir):
+    return _load_json(os.path.join(files_dir, SYNC_GRANTS))
+
+
+SYNC_INBOX_KEEP = 500
+
+
+def _sync_pkg_chats(files_dir, pkg):
+    """@return (send_handles, recv_handles, prefix) or None when not granted."""
+    g = _sync_grants(files_dir).get(pkg) or {}
+    if not g.get("enabled"):
+        return None
+    return (set(g.get("chats_send") or []), set(g.get("chats_recv") or []),
+            g.get("prefix") or "")
+
+
+def _sync_resp(files_dir, req_id, payload):
+    path = os.path.join(files_dir, "SYNC_RESP_" + req_id)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp, path)
+
+
+def _sync_send_dedup(files_dir, control, req):
+    """Durable in-flight/idempotency record for send requests, by client
+    token. A token that already produced a SUCCESSFUL response replays that
+    response instead of sending again - this survives watcher restarts and
+    provider crashes between the bridge send and its own ledger write.
+    Failed responses are NOT recorded: a retry after an explicit failure
+    re-attempts the send. Bounded to the newest 500 tokens."""
+    token = str(req.get("id"))
+    path = os.path.join(files_dir, SYNC_PROCESSED)
+    processed = _load_json(path)
+    if token in processed:
+        return processed[token]
+    resp = _sync_send(files_dir, control, req)
+    if resp.get("ok"):
+        processed[token] = resp
+        while len(processed) > 500:
+            processed.pop(next(iter(processed)))
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(processed, f)
+        os.replace(tmp, path)
+    return resp
+
+
+def _sync_send(files_dir, control, req):
+    from deltachat_rpc_client import Chat
+    pkg = req.get("pkg", "")
+    granted = _sync_pkg_chats(files_dir, pkg)
+    if not granted:
+        return {"ok": False, "error": "NOT_AUTHORIZED"}
+    send_chats, _recv, _prefix = granted
+    handle = req.get("chat", "")
+    if handle not in send_chats:
+        return {"ok": False, "error": "CHAT_NOT_GRANTED"}
+    addr, cid, gen = _sync_decode_handle(handle)
+    st = control._st()
+    if (addr is None or addr != control.bot_addr
+            or gen != "g%s" % st.get("acct_gen", 1)
+            or cid not in control._served_chat_ids()):
+        return {"ok": False, "error": "MALFORMED"}
+    text = req.get("text", "")
+    fname = req.get("file")
+    path = None
+    if fname:
+        if "/" in fname or fname in (".", ".."):
+            return {"ok": False, "error": "MALFORMED"}
+        path = os.path.join(files_dir, "stage", fname)
+        if not os.path.exists(path):
+            return {"ok": False, "error": "MALFORMED"}
+    try:
+        if path:
+            msg = Chat(control.account, cid).send_message(
+                text=text or None, file=path,
+                filename=req.get("filename") or None)
+        else:
+            if not text:
+                return {"ok": False, "error": "MALFORMED"}
+            msg = Chat(control.account, cid).send_message(text=text)
+    except TypeError:
+        # client API mismatch on file kwargs: fail visibly, never silently
+        # downgrade a file send to text-only
+        return {"ok": False, "error": "MALFORMED"}
+    except Exception as e:
+        return {"ok": False, "error": "FAILED", "reason": str(e)[:200]}
+    ref = "m%d" % msg.id
+    refs = _load_json(os.path.join(files_dir, SYNC_REFS))
+    refs[ref] = {"msg_id": msg.id, "chat_id": cid, "handle": handle,
+                 "ts": int(time.time())}
+    tmp = os.path.join(files_dir, SYNC_REFS) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(refs, f)
+    os.replace(tmp, os.path.join(files_dir, SYNC_REFS))
+    _sync_status_write(files_dir, ref, "QUEUED")
+    # the staged bin is left for the stage-TTL sweep: a same-token retry whose
+    # response was lost re-verifies against these bytes to get its ref back
+    return {"ok": True, "ref": ref}
+
+
+def _sync_status_write(files_dir, ref, status, reason=""):
+    path = os.path.join(files_dir, "SYNC_STATUS_" + ref)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"status": status, "reason": reason}, f)
+    os.replace(tmp, path)
+
+
+_STATE_MAP = {"OutPending": "QUEUED", "OutPreparing": "QUEUED",
+              "OutDelivered": "SENT_TO_RELAY", "OutMdnRcvd": "READ",
+              "OutFailed": "FAILED"}
+
+
+def _sync_on_msgs_changed(files_dir, account):
+    """Hook: refresh SYNC_STATUS_<ref> from real core message states."""
+    refs = _load_json(os.path.join(files_dir, SYNC_REFS))
+    if not refs:
+        return
+    terminal = {"SENT_TO_RELAY", "READ", "FAILED", "EXPIRED"}
+    for ref, rec in refs.items():
+        cur = _load_json(os.path.join(files_dir, "SYNC_STATUS_" + ref))
+        if cur.get("status") in terminal:
+            continue
+        try:
+            snap = account.get_message_by_id(rec["msg_id"]).get_snapshot()
+            st = _STATE_MAP.get(str(snap.get("state", "")))
+            if st and st != cur.get("status"):
+                _sync_status_write(files_dir, ref, st)
+        except Exception:
+            pass
+
+
+def _sync_on_new_message(files_dir, account, event):
+    """Hook: capture prefix-matching inbound messages for granted chats."""
+    grants = _sync_grants(files_dir)
+    prefixes = {}
+    for pkg, g in grants.items():
+        if not g.get("enabled"):
+            continue
+        pfx = g.get("prefix") or ""
+        if not pfx:
+            continue  # no prefix: no capture (fail closed)
+        for h in g.get("chats_recv") or []:
+            prefixes.setdefault(h, set()).add(pfx)
+    if not prefixes:
+        return
+    by_cid = {}
+    for h in prefixes:
+        _a, cid, _g = _sync_decode_handle(h)
+        if cid:
+            by_cid[cid] = h
+    try:
+        snap = account.get_message_by_id(event.msg_id).get_snapshot()
+    except Exception:
+        return
+    cid = snap.get("chat_id")
+    handle = by_cid.get(cid)
+    if not handle:
+        return
+    text = snap.get("text") or ""
+    if snap.get("from_id") == account.self_contact.id:
+        return
+    pfx = prefixes.get(handle) or {""}
+    if pfx != {""} and not any(p and text.startswith(p) for p in pfx):
+        return
+    sender = ""
+    try:
+        sender = snap["sender"].get_snapshot().get("address", "")
+    except Exception:
+        pass
+    seq_path = os.path.join(files_dir, SYNC_INBOX_SEQ)
+    try:
+        with open(seq_path) as f:
+            seq = int(f.read().strip() or "0")
+    except Exception:
+        seq = 0
+    seq += 1
+    with open(seq_path, "w") as f:
+        f.write(str(seq))
+    inbox = os.path.join(files_dir, SYNC_INBOX)
+    with open(inbox, "a") as f:
+        json.dump({"seq": seq, "ts": int(time.time()), "chat": handle,
+                   "from": sender, "text": text}, f)
+        f.write("\n")
+    # Bounded retention: keep the newest SYNC_INBOX_KEEP entries. Checked on
+    # every capture - the contract says "the newest 500", and a seq%25 batch
+    # window let up to KEEP+24 linger, which hid poll gaps that the caller
+    # must see (an old cursor only reports gap once trimming actually ran).
+    try:
+        with open(inbox) as f:
+            lines = f.readlines()
+        if len(lines) > SYNC_INBOX_KEEP:
+            tmp = inbox + ".tmp"
+            with open(tmp, "w") as f:
+                f.writelines(lines[-SYNC_INBOX_KEEP:])
+            os.replace(tmp, inbox)
+    except OSError:
+        pass
+
+
+def _sync_poll(files_dir, req):
+    pkg = req.get("pkg", "")
+    granted = _sync_pkg_chats(files_dir, pkg)
+    if not granted:
+        return {"ok": False, "error": "NOT_AUTHORIZED"}
+    _send, recv_chats, prefix = granted
+    try:
+        cursor = int(req.get("cursor") or 0)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "MALFORMED"}
+    items, max_seq, min_seen = [], cursor, None
+    path = os.path.join(files_dir, SYNC_INBOX)
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                if min_seen is None:
+                    min_seen = e.get("seq")
+                if (e.get("seq", 0) > cursor and e.get("chat") in recv_chats
+                        and prefix and (e.get("text") or "").startswith(prefix)):
+                    items.append(e)
+                    max_seq = max(max_seq, e["seq"])
+                if len(items) >= 100:
+                    break
+    resp = {"ok": True, "items": json.dumps(items), "cursor": str(max_seq)}
+    # visible gap: the caller's cursor points at entries retention already
+    # dropped, so commands may have been missed - say so, never silently skip
+    if min_seen is not None and cursor and cursor < min_seen - 1:
+        resp["gap"] = True
+        resp["first_available"] = str(min_seen)
+    return resp
+
+
+def _sync_list_chats(files_dir, control, req):
+    pkg = req.get("pkg", "")
+    granted = _sync_pkg_chats(files_dir, pkg)
+    if not granted:
+        return {"ok": False, "error": "NOT_AUTHORIZED"}
+    send_chats, recv_chats, _p = granted
+    names = _sync_chat_names(control)
+    items = [{"handle": h, "name": names.get(cid, str(cid)),
+              "send": h in send_chats, "recv": h in recv_chats}
+             for h, cid in _sync_handles(files_dir, control)
+             if h in send_chats or h in recv_chats]
+    return {"ok": True, "items": json.dumps(items)}
+
+
+def _sync_watcher(files_dir, control):
+    """Serves SYNC_REQ_<id> files written by the Android transport provider;
+    also keeps SYNC_ALIVE fresh for the provider's liveness check, mirrors
+    SYNC_CHATS for the Connected-apps UI, and sweeps expired stage files."""
+    flag = os.path.join(files_dir, STOP_FLAG)
+    alive = os.path.join(files_dir, SYNC_ALIVE)
+    stage = os.path.join(files_dir, "stage")
+    last_chat_sig = None
+    while not os.path.exists(flag):
+        try:
+            with open(alive, "w") as f:
+                f.write(str(int(time.time())))
+        except OSError:
+            pass
+        try:
+            sig = repr(_sync_handles(files_dir, control))
+            if sig != last_chat_sig:
+                last_chat_sig = sig
+                names = _sync_chat_names(control)
+                items = [{"handle": h, "name": names.get(cid, str(cid))}
+                         for h, cid in _sync_handles(files_dir, control)]
+                tmp = os.path.join(files_dir, SYNC_CHATS) + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(items, f)
+                os.replace(tmp, os.path.join(files_dir, SYNC_CHATS))
+        except Exception as e:
+            log.warning("sync chat mirror failed: %s", e)
+        try:
+            now = time.time()
+            for n in os.listdir(stage) if os.path.isdir(stage) else []:
+                fp = os.path.join(stage, n)
+                if now - os.path.getmtime(fp) > STAGE_TTL_S:
+                    os.unlink(fp)
+        except OSError:
+            pass
+        for name in sorted(os.listdir(files_dir)):
+            if not name.startswith("SYNC_REQ_"):
+                continue
+            req_id = name[len("SYNC_REQ_"):]
+            req = _load_json(os.path.join(files_dir, name))
+            try:
+                os.unlink(os.path.join(files_dir, name))
+            except OSError:
+                continue
+            try:
+                method = req.get("method")
+                if method == "send":
+                    resp = _sync_send_dedup(files_dir, control, req)
+                elif method == "listChats":
+                    resp = _sync_list_chats(files_dir, control, req)
+                elif method == "poll":
+                    resp = _sync_poll(files_dir, req)
+                else:
+                    resp = {"ok": False, "error": "UNKNOWN_METHOD"}
+            except Exception as e:
+                log.warning("sync request %s failed: %s", req_id, e)
+                resp = {"ok": False, "error": "FAILED", "reason": str(e)[:200]}
+            try:
+                _sync_resp(files_dir, req_id, resp)
+            except OSError as e:
+                log.warning("sync response %s write failed: %s", req_id, e)
+        time.sleep(1)
+
+
+def _watchdog(files_dir, rpc):
+    """Real stop: Java writes STOP -> close rpc (breaks run_forever)."""
+    flag = os.path.join(files_dir, STOP_FLAG)
+    while True:
+        time.sleep(2)
+        if os.path.exists(flag):
+            log.info("STOP flag seen - shutting down")
+            try:
+                rpc.close()
+            except Exception:
+                pass
+            return
+
+
+def run(native_lib_dir, files_dir):
+    """Live loop. Provision required. Serves every accepted chat; management
+    (invite QR, publishing) is app-side via the file request watchers."""
+    from deltachat_rpc_client import Bot, EventType
+    from deltachat_rpc_client.events import NewMessage, RawEvent
+
+    st = load_state(files_dir)
+    if not st.get("provisioned"):
+        raise RuntimeError("not provisioned")
+
+    lock = os.path.join(files_dir, RUN_LOCK)
+    flag = os.path.join(files_dir, STOP_FLAG)
+    for f in (lock, flag):
+        try:
+            os.unlink(f)
+        except FileNotFoundError:
+            pass
+    with open(lock, "w") as f:
+        f.write(str(os.getpid()))
+
+    rpc, dc = _rpc(native_lib_dir, files_dir)
+    try:
+        bot_acct = _account(dc)
+        control = ChatControl(bot_acct, files_dir)
+        bot_acct.start_io()
+        wd = threading.Thread(target=_watchdog, args=(files_dir, rpc),
+                              daemon=True, name="bot-stop-watchdog")
+        wd.start()
+        iw = threading.Thread(target=_invite_watcher, args=(files_dir, bot_acct),
+                              daemon=True, name="bot-invite-qr")
+        iw.start()
+        pw = threading.Thread(target=_publish_watcher, args=(files_dir, control),
+                              daemon=True, name="bot-app-publish")
+        pw.start()
+        sw = threading.Thread(target=_sync_watcher, args=(files_dir, control),
+                              daemon=True, name="bot-app-sync")
+        sw.start()
+        ctl_bot = Bot(bot_acct, hooks=[
+            (control.on_new_message, NewMessage),
+            (lambda ev: _sync_on_new_message(files_dir, bot_acct, ev), NewMessage),
+            (control.on_status_update, RawEvent(EventType.WEBXDC_STATUS_UPDATE)),
+            (control.on_msgs_changed, RawEvent(EventType.MSGS_CHANGED)),
+            (lambda ev: _sync_on_msgs_changed(files_dir, bot_acct),
+             RawEvent(EventType.MSGS_CHANGED)),
+        ])
+        control.boot_runtimes()  # needs IO (download retries)
+        log.info("live bot running as %s (chats %s)",
+                 control.bot_addr, sorted(control.runtimes))
+        ctl_bot.run_forever()
+    finally:
+        try:
+            rpc.close()
+        finally:
+            try:
+                os.unlink(lock)
+            except FileNotFoundError:
+                pass
+
+
+class _FixtureControl:
+    """Account-less control for the offline transport fixture: lets the SYNC
+    bridge serve real provider traffic (auth, grants, pipes, bridge round
+    trip, failure mapping) with NO account, NO network and NO core run.
+    Sends fail visibly at the rpc boundary; inbound stays empty by
+    construction, so a poll returns an honest empty page."""
+
+    def __init__(self, files_dir):
+        self.files_dir = files_dir
+        self.account = None
+        self.bot_addr = load_state(files_dir).get(
+            "bot_addr", "bot-fixture@fixture.invalid")
+
+    def _st(self):
+        return load_state(self.files_dir)
+
+    def _served_chat_ids(self):
+        return {int(c) for c in (self._st().get("chats") or {})}
+
+
+class _FixtureMsg:
+    def __init__(self, snap):
+        self._snap = snap
+
+    def get_snapshot(self):
+        return self._snap
+
+
+class _FixtureSelfContact:
+    id = 1
+
+
+class _FixtureAccount:
+    """Just enough of the rpc account surface for the REAL capture hook."""
+    self_contact = _FixtureSelfContact()
+
+    def __init__(self):
+        self._msgs = {}
+        self.addr_by_id = {}          # from_id -> sender address
+        self._peer_chats = {}         # addr -> synthetic 1:1 chat id
+        self._next_peer_chat = [5000]
+
+    def get_message_by_id(self, mid):
+        return self._msgs[mid]
+
+    def list_transports(self):
+        return [{"addr": "fixture-bot@fixture.invalid"}]
+
+    def get_config(self, key):
+        return None
+
+    def create_contact(self, addr):
+        return _FixturePeerContact(self, addr)
+
+    def peer_chat_id(self, addr):
+        if addr not in self._peer_chats:
+            self._next_peer_chat[0] += 1
+            self._peer_chats[addr] = self._next_peer_chat[0]
+        return self._peer_chats[addr]
+
+
+class _FixturePeerContact:
+    """create_contact() result: only what the capture route uses."""
+
+    def __init__(self, account, addr):
+        self.account = account
+        self.addr = addr
+
+    def create_chat(self):
+        return _FixtureChat(self.account, self.account.peer_chat_id(self.addr))
+
+
+class _FixtureContactView:
+    """Contact(account, from_id) stand-in: resolves the sender address the
+    inject spec declared, so the route's exact-sender check runs for real."""
+
+    def __init__(self, account, contact_id):
+        self.account = account
+        self.contact_id = contact_id
+
+    def get_snapshot(self):
+        return {"addr": self.account.addr_by_id.get(self.contact_id)}
+
+
+class _FixtureSnap(dict):
+    """dict with attribute access, matching the MessageSnapshot surface the
+    route reads (snap.get(...), snap.chat_id)."""
+
+    def __getattr__(self, k):
+        try:
+            return self[k]
+        except KeyError:
+            raise AttributeError(k)
+
+
+class _FixtureChat:
+    """Synthetic rpc-boundary Chat for the fixture: every send succeeds
+    (unless files_dir/FIXTURE_RPC_DOWN exists, simulating core failure) and
+    is logged to fixture-sends.jsonl so the gate can count real send calls.
+    This proves the provider/bridge/dedup machinery only - it is NOT a
+    relay delivery of any kind."""
+    _next = [9000]
+    _dir = ["."]
+
+    def __init__(self, account, chat_id):
+        self.chat_id = chat_id
+
+    def send_message(self, text=None, file=None, filename=None):
+        if os.path.exists(os.path.join(_FixtureChat._dir[0], "FIXTURE_RPC_DOWN")):
+            raise RuntimeError("fixture rpc down")
+        _FixtureChat._next[0] += 1
+        with open(os.path.join(_FixtureChat._dir[0], "fixture-sends.jsonl"),
+                  "a") as f:
+            json.dump({"id": _FixtureChat._next[0], "chat_id": self.chat_id,
+                       "text": text, "file": file, "filename": filename}, f)
+            f.write("\n")
+        m = _FixtureMsg({"id": _FixtureChat._next[0]})
+        m.id = _FixtureChat._next[0]
+        return m
+
+    def send_text(self, text):
+        return self.send_message(text=text)
+
+    def get_basic_snapshot(self):
+        return {"name": "fixture chat %s" % self.chat_id}
+
+
+def _fixture_inject_loop(files_dir, acct, stop):
+    """Applies FIXTURE_INJECT_*.json specs through the REAL inbound capture
+    hook: {chat_id, text, from, msg_id, fill} -> _sync_on_new_message."""
+    import types
+    while not os.path.exists(stop):
+        try:
+            for n in sorted(os.listdir(files_dir)):
+                if not n.startswith("FIXTURE_INJECT_"):
+                    continue
+                spec = _load_json(os.path.join(files_dir, n))
+                try:
+                    os.unlink(os.path.join(files_dir, n))
+                except OSError:
+                    continue
+                for k in range(int(spec.get("fill") or 1)):
+                    mid = int(spec.get("msg_id") or 1000) + k
+                    acct._msgs[mid] = _FixtureMsg({
+                        "chat_id": int(spec.get("chat_id") or 11),
+                        "text": spec.get("text") or "",
+                        "from_id": 2,
+                        "sender": _FixtureMsg(
+                            {"address": spec.get("from")
+                             or "user@fixture.invalid"}),
+                    })
+                    _sync_on_new_message(files_dir, acct,
+                                         types.SimpleNamespace(msg_id=mid))
+        except Exception as e:
+            log.warning("fixture inject failed: %s", e)
+        time.sleep(0.5)
+
+
+def _route_fixture_runtime(files_dir):
+    """ChatControl over the fixture account with the rpc-boundary classes
+    patched, exactly as run_route_fixture sets up; tests use this too."""
+    import sys
+    import types
+    try:
+        import deltachat_rpc_client
+    except ImportError:
+        # Host test without the client installed: the fixture patches every
+        # class the route touches, so a bare module object is enough.
+        deltachat_rpc_client = types.ModuleType("deltachat_rpc_client")
+        sys.modules["deltachat_rpc_client"] = deltachat_rpc_client
+    deltachat_rpc_client.Chat = _FixtureChat
+    deltachat_rpc_client.Contact = _FixtureContactView
+    _FixtureChat._dir[0] = files_dir
+    acct = _FixtureAccount()
+    st = load_state(files_dir)
+    chats = st.get("chats", {})
+    # The fixture's served chat: serving itself is established behavior
+    # (accept-the-QR path); what this fixture proves is the ROUTE.
+    chats.setdefault("11", {"list_id": "fixture-list"})
+    save_state(files_dir, chats=chats)
+    return ChatControl(acct, files_dir), acct
+
+
+def _route_fixture_apply(files_dir, runtime, acct, spec):
+    """Drive the REAL BotRuntime.on_new_message with one injected message:
+    {chat_id, text, from, from_id, msg_id, file?}."""
+    import types
+    from_id = int(spec.get("from_id") or 2)
+    acct.addr_by_id[from_id] = spec.get("from") or "user@fixture.invalid"
+    snap = _FixtureSnap({
+        "chat_id": int(spec.get("chat_id") or 11),
+        "text": spec.get("text") or "",
+        "from_id": from_id,
+        "file": spec.get("file"),
+        "is_info": False,
+        "id": int(spec.get("msg_id") or 1000),
+    })
+    runtime.on_new_message(types.SimpleNamespace(message_snapshot=snap))
+
+
+def run_route_fixture(files_dir):
+    """Offline CAPTURE-ROUTE fixture: drives the REAL live message path
+    (BotRuntime.on_new_message, capture route included) against the fixture
+    account, applying FIXTURE_ROUTE_*.json specs until STOP_FLAG appears.
+    Sends land in fixture-sends.jsonl for the gate. No account, no network,
+    no core, and no claim of relay delivery."""
+    flag = os.path.join(files_dir, STOP_FLAG)
+    try:
+        os.unlink(flag)
+    except FileNotFoundError:
+        pass
+    runtime, acct = _route_fixture_runtime(files_dir)
+    while not os.path.exists(flag):
+        try:
+            for n in sorted(os.listdir(files_dir)):
+                if not n.startswith("FIXTURE_ROUTE_"):
+                    continue
+                spec = _load_json(os.path.join(files_dir, n))
+                try:
+                    os.unlink(os.path.join(files_dir, n))
+                except OSError:
+                    continue
+                _route_fixture_apply(files_dir, runtime, acct, spec)
+        except Exception as e:
+            log.warning("route fixture inject failed: %s", e)
+        time.sleep(0.5)
+
+
+def run_sync_fixture(files_dir):
+    """Offline SYNC-bridge fixture: runs the same watcher the live bot runs,
+    against a fixture control, with a synthetic Chat at the rpc boundary and
+    a FIXTURE_INJECT_*.json inbound injection loop driving the REAL capture
+    hook. Used by the on-device emulator gate; no account, no network, no
+    core, and no claim of relay delivery."""
+    import deltachat_rpc_client
+    deltachat_rpc_client.Chat = _FixtureChat
+    _FixtureChat._dir[0] = files_dir
+    flag = os.path.join(files_dir, STOP_FLAG)
+    try:
+        os.unlink(flag)
+    except FileNotFoundError:
+        pass
+    acct = _FixtureAccount()
+    inj = threading.Thread(target=_fixture_inject_loop,
+                           args=(files_dir, acct, flag),
+                           daemon=True, name="bot-fixture-inject")
+    inj.start()
+    _sync_watcher(files_dir, _FixtureControl(files_dir))
+
+
+def service_entry(native_lib_dir, files_dir, mode):
+    """Java entry point. mode: 'provision' | 'live'. Logs to files_dir/bot.log."""
+    h = logging.FileHandler(os.path.join(files_dir, "bot.log"))
+    h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    # one handler per file per process: the interpreter outlives entry calls
+    if not any(getattr(x, "baseFilename", None) == h.baseFilename
+               for x in root.handlers):
+        root.addHandler(h)
+    try:
+        if mode == "provision":
+            addr = provision(native_lib_dir, files_dir)
+            log.info("PROVISION DONE addr=%s", addr)
+        elif mode == "live":
+            run(native_lib_dir, files_dir)
+        elif mode == "syncfixture":
+            run_sync_fixture(files_dir)
+        elif mode == "routefixture":
+            run_route_fixture(files_dir)
+        elif mode == "pairbidik":
+            # Owner-only setup (app-private request file written by the
+            # UI): store the paired Bidik peer address in state. Never a
+            # chat command - a served-chat user must not redirect captures.
+            import capture_route
+            req = os.path.join(files_dir, "PAIR_BIDIK_REQ")
+            with open(req) as f:
+                addr = f.read().strip().lower()
+            os.remove(req)
+            if not capture_route.is_plausible_addr(addr):
+                raise RuntimeError("implausible Bidik address refused: %r" % addr[:80])
+            save_state(files_dir, bidik_peer_addr=addr)
+            log.info("PAIRBIDIK DONE peer=%s", addr)
+        elif mode == "liveroute":
+            # CI-only live capture-route proof; see live_relay.py and
+            # tools/live-relay-route.sh.
+            import live_relay
+            live_relay.configure_then_run(native_lib_dir, files_dir)
+        elif mode == "selfecho":
+            # CI-only live-relay sign-in proof; see live_relay.py.
+            import live_relay
+            live_relay.run(native_lib_dir, files_dir)
+        elif mode == "export":
+            # Activity stops the live service first; the quiescent DB is
+            # exported here. The transfer code goes ONLY to EXPORT_RESULT
+            # (app-private, read+deleted by the activity) - never logged.
+            import migration
+            path = migration.export_migration(
+                native_lib_dir, files_dir,
+                os.path.join(files_dir, "export-out"))
+            log.info("EXPORT DONE bundle=%s (transfer code not logged)", path)
+        else:
+            raise ValueError("unknown mode %r" % mode)
+    except Exception as e:
+        log.exception("service_entry %s failed: %s", mode, e)
+        raise
