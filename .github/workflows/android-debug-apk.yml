@@ -54,7 +54,7 @@ jobs:
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
           AAPT=$(find "$SDK/build-tools" -type f -name aapt | sort -V | tail -1)
           test -n "$AAPT"
-          "$AAPT" dump badging "$APK" | grep -F "package: name='com.vanipy.jin' versionCode='15' versionName='0.5.2'"
+          "$AAPT" dump badging "$APK" | grep -F "package: name='com.vanipy.jin' versionCode='16' versionName='0.5.3'"
 
       - name: Upload qualification APK
         uses: actions/upload-artifact@v4
