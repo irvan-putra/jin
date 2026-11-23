@@ -61,6 +61,9 @@ when the module is absent - normal chat handling is unchanged.
 All env values are sensitive: NEO App injects plain key/value env vars, so
 never echo them into logs, status, or the repo.
 
+Redeploying from zero (costs, exact call sequence, teardown, and the
+four gotchas from the 2026-11-23 trial): [DEPLOY.md](DEPLOY.md).
+
 ## Deploy on NEO App (needs the owner's account; not done from the repo)
 
 1. In the NEO portal: create a managed **PostgreSQL** database (14–16) and
