@@ -14,7 +14,7 @@ back (e.g. restore state from storage).
 
 Real deltachat-rpc-server core, real chatmail transport (throwaway
 auto-created profiles on nine.testrun.org, no signup, no personal data),
-the real itdxdc .xdc built from github.com/irvan-putra/intodo
+the real itdxdc .xdc built from github.com/irvan-putra/tindak
 webxdc/ source, the actual BridgeBot code:
 
 - bot profile joins the group, receives the webxdc instance

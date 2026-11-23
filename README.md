@@ -56,7 +56,7 @@ itdapk", which pauses the live bot and writes ONE encrypted `.dcmig` bundle
 
 ## Related projects
 
-- [intodo](https://github.com/irvan-putra/intodo) embeds this same bot
+- [intodo](https://github.com/irvan-putra/tindak) embeds this same bot
   runtime inside itdapk, alongside the todo lists it serves. jin is the
   standalone runner.
 
