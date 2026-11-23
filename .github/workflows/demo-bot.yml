@@ -1,0 +1,82 @@
+name: demo bot
+
+# Throwaway public demo of jin's DeltaChat bot. It is NOT the real jin bot and
+# holds no personal data. It wakes on a schedule, fetches messages from the
+# chatmail relay, answers, and stops, so replies can be slow (GitHub's
+# scheduler can delay or skip runs). Account keys and chat lists are sealed
+# with a key kept in the JIN_DEMO_STATE_KEY Actions secret and carried between
+# runs in the Actions cache. Only ciphertext is stored; nothing secret is in
+# this repository.
+on:
+  schedule:
+    - cron: "4-59/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      provision:
+        description: "Create the demo bot account (only when no state exists)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      DEMO_STATE_KEY: ${{ secrets.JIN_DEMO_STATE_KEY }}
+      STATE_DIR: ${{ github.workspace }}/.demo-state
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: demo-bot/requirements.txt
+      - run: pip install -r demo-bot/requirements.txt
+      - name: Restore sealed state
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: sealed
+          key: demo-bot-state-none
+          restore-keys: demo-bot-state-
+      - name: Unseal
+        id: unseal
+        run: |
+          if [ -f sealed/state.bin ]; then
+            python demo-bot/seal_cli.py unseal sealed/state.bin "$STATE_DIR"
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Provision (explicit, first time only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.provision && steps.unseal.outputs.have == 'false' }}
+        run: |
+          python demo-bot/demo_bot.py provision | grep -E '^(ADDR|QR) ' | tee demo-invite.txt
+      - name: Stop when there is no state
+        if: ${{ steps.unseal.outputs.have == 'false' && !(github.event_name == 'workflow_dispatch' && inputs.provision) }}
+        run: |
+          echo "::warning::No saved state. Not creating a new account automatically (it would change the invite). Run this workflow by hand with provision=true."
+      - name: Answer messages
+        if: ${{ steps.unseal.outputs.have == 'true' }}
+        env:
+          MIN_S: "60"
+          MAX_S: "150"
+        run: python demo-bot/demo_bot.py run
+      - name: Seal state
+        if: ${{ steps.unseal.outputs.have == 'true' || (github.event_name == 'workflow_dispatch' && inputs.provision) }}
+        run: |
+          mkdir -p sealed
+          python demo-bot/seal_cli.py seal "$STATE_DIR" sealed/state.bin
+      - name: Save sealed state
+        if: ${{ steps.unseal.outputs.have == 'true' || (github.event_name == 'workflow_dispatch' && inputs.provision) }}
+        uses: actions/cache/save@v4
+        with:
+          path: sealed
+          key: demo-bot-state-${{ github.run_id }}-${{ github.run_attempt }}
