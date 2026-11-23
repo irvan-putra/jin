@@ -111,10 +111,10 @@ def jin(version):
     k = S / 192.0
     d.rectangle([93 * k, 33 * k, 98 * k, 56 * k], fill=WHITE)
     d.ellipse([90.5 * k, 22 * k, 100.5 * k, 33 * k], fill=ORANGE)
-    d.rounded_rectangle([48 * k, 53 * k, 143 * k, 138 * k], radius=18 * k, fill=WHITE)
+    d.rounded_rectangle([48 * k, 53 * k, 143 * k, 138 * k], radius=18 * k, fill=ORANGE)
     for ex in (78, 114):
         d.ellipse([(ex - 7) * k, 81 * k, (ex + 7) * k, 95 * k], fill=BG)
-    d.arc([77 * k, 100 * k, 115 * k, 124 * k], 20, 160, fill=ORANGE, width=int(5 * k))
+    d.arc([77 * k, 100 * k, 115 * k, 124 * k], 20, 160, fill=BG, width=int(5 * k))
     return compose(BG, art, version, (8, 12, 22, 255), (245, 248, 252, 255), rounded=.2)
 
 
