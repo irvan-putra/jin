@@ -1,6 +1,6 @@
 Note (15 Nov 2026): this repo contains the standalone validation builds used
 while developing the phone-side DeltaChat bot runtime. The runtime later moved
-into [intodo](https://github.com/irvan-putra/intodo) as itdapk's embedded bot -
+into [intodo](https://github.com/irvan-putra/tindak) as itdapk's embedded bot -
 see intodo for the current source and releases. The text below describes these
 validation builds as they were.
 
