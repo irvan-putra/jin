@@ -51,7 +51,9 @@ over a public chatmail relay, with the bot's invitation QR as the only way in.
 - 2026-11-19: Jin is the planned hub for apps that need DeltaChat sync,
   starting with Bidik, in both directions.
 - 2026-11-20: parked. 2026-11-24: still parked; context recorded here.
-- 2026-11-24: Jin web page published, see the README. No public demo bot: a
-  live demo bot would need an always-on host, which means paid hosting (about
-  Rp182k per month before tax, per `server/DEPLOY.md`) and a new API key. Not
-  approved, so the page ships without a bot QR.
+- 2026-11-24: Jin web page published, see the README. A separate public
+  demo bot uses free daily GitHub Actions jobs, with replies taking 1-2 days
+  (sometimes longer), not an always-on paid host. The page labels its bearer
+  invite as a demo, not private. It echoes text and handles small per-chat
+  lists only. This does not unpark Bidik-Jin or prove the real-phone link.
+  Recovery and limits: `demo-bot/README.md`; full-host runbook: `server/DEPLOY.md`.

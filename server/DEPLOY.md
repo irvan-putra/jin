@@ -153,3 +153,66 @@ Bot identity and op histories live as encrypted checkpoint bundles in the
 Postgres database (last 3 kept); blobs (incoming `.xdc`, results, invite
 artifacts) live in the bucket. The container's work dir is ephemeral.
 Full env contract and architecture: [README.md](README.md).
+
+## Which deployment are you restoring?
+
+The paid NEO trial above was torn down, not merely stopped. Its old IDs and
+hostname are historical: do not try to restart a deleted app. The public
+[demo](../demo-bot/README.md) is a separate, limited daily GitHub Actions bot,
+not the full hosted service and not the owner's Android account. Its state
+and key cannot restore the hosted bot. These instructions are a recovery
+recipe, not approval to create paid resources.
+
+### Rebuild from scratch after deletion
+
+1. Get approval for the current full NEO estimate before creating or starting
+   billable resources. Use the official portal to supply current credentials
+   securely; never commit keys or connection strings. The November 2026 rate
+   above is a historical estimate, not a current quote.
+2. Clone this repository and check out the intended tested commit. Run
+   `python3 -m unittest discover -s server/tests -v`. Review `server/Dockerfile`
+   and the environment contract in `server/README.md`.
+3. Follow Procedure steps 1-8 with a **new dedicated project**, database,
+   private bucket and app, recording the new IDs and HTTPS domain privately.
+   Use `server/` as the build context and its Dockerfile, port 8080, one
+   fixed replica, 0.5 CPU and 512Mi RAM. Recreate bindings and secret variables;
+   deleted project tokens may not work on the replacement.
+4. To preserve identity, restore a retained encrypted checkpoint and blob
+   backup plus the matching transfer code before starting the bot. The code
+   alone is not a backup. If the old database/bucket and all backups were
+   deleted, the old identity and histories cannot be recovered: deliberately
+   provision a new account and replace any invite only after a real round trip.
+5. Apply every gotcha above, especially `JIN_S3_SIGNING_REGION` and a
+   stop-then-start update. Run the full post-deploy checklist. Recheck the
+   serving image, replicas and usage after every deployment.
+
+### Restart an existing retained service
+
+First verify the project, app, database and bucket still exist. Keep their
+bindings, matching transfer code and checkpoint data. Starting retained
+resources resumes charges and requires approval of the current costs. Stop
+the app before an update, wait for all old pods to terminate and the database
+lease to expire (up to 90 seconds), then start exactly one replica. Do not run
+two independent instances with the same account. Follow the post-deploy
+checklist, including the real message round trip and an image-tag check.
+
+### State check before and after restart
+
+Record the latest checkpoint time, bot identity, served-chat count and image
+tag in private operations notes. Verify `/healthz` and `/status`, but also send
+a harmless synthetic message from an existing served chat and confirm its
+previous list/history remains. Verify a new checkpoint is stored. Never print
+transfer codes, relay credentials, decrypted checkpoints or personal list
+contents into build logs or this public repository. If restore fails, stop
+rather than silently creating a replacement bot.
+
+### Pause versus teardown
+
+Stopping only app compute does not necessarily stop database or bucket charges.
+For a temporary pause, check each retained resource's current billing and
+compare usage samples. For full removal, export and privately retain encrypted
+checkpoint/blob backups and the matching transfer code if future recovery is
+wanted, then follow Teardown above. Check app, database and bucket inventory,
+remove the empty project in the portal if required, and compare later usage
+samples. Remove stale public invites and endpoints. Deleting resources without
+backups is irreversible even if the transfer code is still saved.

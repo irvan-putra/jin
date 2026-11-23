@@ -65,3 +65,13 @@ whose key starts `demo-bot-state-`. Delete `JIN_DEMO_STATE_KEY` only after decid
 the sealed state is no longer needed. Do not delete Android build caches or
 unrelated secrets. Relay-side account retention is governed by the relay, not
 by deleting the workflow. No paid host was created for this demo.
+
+## Verified checks (2026-11-24)
+
+- [Separate run restored the previous account and synthetic list item](https://github.com/irvan-putra/jin/actions/runs/45268588348).
+- [Fresh tester received an actual echo and add reply](https://github.com/irvan-putra/jin/actions/runs/45269308466).
+- [Later run served list from the same tester](https://github.com/irvan-putra/jin/actions/runs/45269636162), confirming its synthetic item survived a stop/start.
+- Seven local tests cover commands, isolation, caps and sealed-state restore.
+
+GitHub policy references: [schedule](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule),
+[cache retention](https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#usage-limits-and-eviction-policy).

@@ -12,10 +12,13 @@ isolated list — a group gets a shared list, a direct chat gets a personal
 list. There is no owner identity and no chat-side management; all management
 is app-side.
 
-Web page: <https://vanipy.com/jin/> explains jin, shows the install steps and
-links the latest APK (with a QR for the APK download only). It has no bot
-contact QR: the invitation QR is a bearer invite made on your phone, and no
-public demo bot is running. Source: `web/`.
+Web page: <https://vanipy.com/jin/> explains jin, shows install steps and
+links the APK. It also has a separate throwaway **Jin demo (public)** contact
+QR: replies take **1-2 days**, sometimes longer, and it is **not private**.
+Ordinary text is echoed back; list commands are available too. The free demo
+runs once daily in GitHub Actions, not continuously, and does not host the
+full Android runtime. See [demo-bot/README.md](demo-bot/README.md) for caps,
+cache-loss/schedule limits and recovery. Source: `web/`.
 
 ## Using jin
 
@@ -68,8 +71,9 @@ parked: the Jin side route and transport provider exist, bidik does not use
 them yet, and nothing is proven on a real phone. See
 [docs/bidik-link.md](docs/bidik-link.md).
 
-A public demo bot is not running. It would need always-on paid hosting
-(see `server/DEPLOY.md`), which has not been approved.
+The public demo uses free daily scheduled jobs, not paid always-on hosting.
+The full hosted service remains a separate option, with no new hosting approved.
+From-scratch redeploy, restart, state checks and teardown: [server/DEPLOY.md](server/DEPLOY.md).
 
 ## Related projects
 

@@ -22,7 +22,7 @@ h2{font-size:1.1rem;margin:1.4rem 0 .3rem}
 .note{border:1px solid var(--line);border-left:4px solid var(--amber);background:var(--card);border-radius:8px;padding:.55rem .7rem;margin:.8rem 0;font-size:.92rem}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:.7rem .9rem;margin:.6rem 0}
 .qr{display:flex;gap:1rem;align-items:center;flex-wrap:wrap}
-.qr img{width:160px;height:160px;background:#fff;border-radius:8px;padding:4px;border:1px solid var(--line)}
+.qr img{width:240px;height:240px;background:#fff;border-radius:8px;padding:4px;border:1px solid var(--line)}
 code{font-size:.82rem;word-break:break-all}
 ol,ul{padding-left:1.2rem}li{margin:.3rem 0}
 .sub{color:var(--mute);font-size:.88rem}
@@ -35,7 +35,7 @@ footer{color:var(--mute);font-size:.85rem;margin-top:1.5rem}
   <p>jin turns an Android phone into a small bot host for <a href="https://delta.chat">Delta Chat</a>. It makes the bot its own chatmail account, answers messages in the chats you invite it to, and delivers webxdc apps (<code>.xdc</code> files) to those chats. It all runs on the phone. The only network traffic is mail to the public chatmail relay.</p>
   <p><a class="btn primary" href="https://github.com/irvan-putra/jin/releases/download/v0.5.2/jin-v0.5.2.apk">Download jin for Android v0.5.2</a>
      <a class="btn" href="https://github.com/irvan-putra/jin/releases/tag/v0.5.2">Release notes</a></p>
-  <div class="note">Jin needs a phone: the bot is an Android foreground service, so it cannot run inside a web page. This page is the explanation and install guide. Test release; real-device behavior is still being checked.</div>
+  <div class="note">Jin needs a phone: the bot is an Android foreground service, so it cannot run inside a web page. This page is the explanation and install guide, with a separate slow demo below. Test release; real-device behavior is still being checked.</div>
 
   <h2>Install</h2>
   <ol>
@@ -57,9 +57,16 @@ footer{color:var(--mute);font-size:.85rem;margin-top:1.5rem}
     <li><b>Add the bot to chats.</b> Each group gets its own shared list, each direct chat its own personal list.</li>
     <li><b>Publish an app version.</b> Pick an <code>.xdc</code> file and the bot sends it to every chat it serves.</li>
   </ol>
-  <div class="note"><b>Why there is no bot QR on this page.</b> The invitation QR is a bearer invite: whoever holds it can reach that bot. Yours is made on your phone and should stay with the people you pick, so it cannot be a public code here. A public demo bot would need a server running all the time; there is none yet.</div>
+  <h2>Try the demo bot</h2>
+  <div class="note"><b>Demo bot. Replies take 1-2 days. Not private.</b> This is a throwaway demo, separate from your own bot. Do not send personal or sensitive information. It checks mail once a day, not continuously. GitHub may delay or skip runs, so replies can take longer. Joining may take one run, then your first reply another.</div>
+  <div class="card qr">
+    <img src="demo-qr.svg" alt="Delta Chat invite QR for Jin demo (public), replies take 1-2 days, not private" width="160" height="160">
+    <div><b>Jin demo (public)</b><p><a class="btn primary" href="https://i.delta.chat/#3E2C5657CB729168644DA8C21A0F1138CB336E75&amp;v=3&amp;i=YM8nU2CS-HBOxFY55K3DNe0r&amp;s=02IXBH5OnQQ45LttC1HLFgBP&amp;a=wqsmxcibm%40nine.testrun.org&amp;n=Jin+demo+%28public%29">Open demo in Delta Chat</a></p><div class="sub">Scan this contact QR in Delta Chat, or use the button on the same device. This QR reaches the demo bot, not the APK download.</div></div>
+  </div>
+  <p>Send any ordinary text and it echoes it back (up to 2,000 characters). Commands: <code>add buy milk</code>, <code>list</code>, <code>done 1</code>, <code>clear</code>, <code>help</code>. Each chat has its own small list. This demo does not publish webxdc apps, control your phone or connect to Bidik.</p>
+  <p class="sub">Runs daily at 03:17 UTC (10:17 WIB). GitHub disables schedules after 60 days without repository activity, such as commits. Its cache may be evicted, losing this demo account and lists; the invite would need replacing after re-provisioning. Lists may reset at any time. Limits: 20 items per chat, 200 characters per item, 200 chats; at most 5 replies per chat and 60 total per run, excess messages are dropped. No guaranteed response time. <a href="https://github.com/irvan-putra/jin/blob/main/demo-bot/README.md">Demo details and recovery</a>.</p>
 
-  <h2>Trust and limits</h2>
+  <h2>Android bot trust and limits</h2>
   <ul>
     <li>Contact requests are refused. Only holders of the invitation QR get in.</li>
     <li>No chat can publish or administer the bot; all management is in the app.</li>
