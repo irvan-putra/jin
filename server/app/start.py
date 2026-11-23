@@ -95,6 +95,20 @@ class Config:
         self.s3_path_style = env.get("JIN_S3_PATH_STYLE", "1") != "0"
 
 
+def status_snapshot(service):
+    """The /status body: stored booleans plus live computed counts.
+    served_chats reflects the running control's runtime set, not the boot
+    snapshot; checkpoint age is computed from the last checkpoint time."""
+    snap = service.status.snapshot()
+    if service.last_checkpoint:
+        snap["last_checkpoint_age_s"] = int(
+            time.time() - service.last_checkpoint)
+    control = getattr(service, "control", None)
+    if control is not None:
+        snap["served_chats"] = len(control.runtimes)
+    return snap
+
+
 def serve_http(service, port):
     """Booleans-and-counts status over HTTP. No secrets, no QR, no addr."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -113,11 +127,7 @@ def serve_http(service, port):
             if self.path == "/healthz":
                 self._json(200, {"ok": True})
             elif self.path == "/status":
-                snap = service.status.snapshot()
-                if service.last_checkpoint:
-                    snap["last_checkpoint_age_s"] = int(
-                        time.time() - service.last_checkpoint)
-                self._json(200, snap)
+                self._json(200, status_snapshot(service))
             else:
                 self._json(404, {"error": "not found"})
 

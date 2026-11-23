@@ -66,6 +66,7 @@ class Service:
         self.bucket = bucket
         self.status = Status()
         self.acct = None
+        self.control = None  # live ChatControl while the bot thread runs
         self.last_checkpoint = 0.0
         self.stop_event = threading.Event()
         self.threads = []
@@ -96,6 +97,7 @@ class Service:
             acct = bot_runtime._account(dc)
             self.acct = acct
             control = bot_runtime.ChatControl(acct, files_dir)
+            self.control = control  # /status reads served chats live
             acct.start_io()
             for name, target, args in (
                 ("bot-stop-watchdog", bot_runtime._watchdog, (files_dir, rpc)),
@@ -124,6 +126,7 @@ class Service:
         finally:
             self.status.set(running=False)
             self.acct = None
+            self.control = None
             try:
                 rpc.close()
             except Exception:
