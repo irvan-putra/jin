@@ -36,7 +36,7 @@ is app-side.
 **Diagnostics, logs and export** live in the left-edge menu: swipe from the
 left edge of the screen, or long-press anywhere. The menu holds the log
 viewer, the offline validation probe (no network), and "Export bot for
-itdapk", which pauses the live bot and writes ONE encrypted `.dcmig` bundle
+tindak", which pauses the live bot and writes ONE encrypted `.dcmig` bundle
 (account backup + bot state) protected by a one-time transfer code — see
 [integration/MIGRATION.md](integration/MIGRATION.md).
 
@@ -56,8 +56,8 @@ itdapk", which pauses the live bot and writes ONE encrypted `.dcmig` bundle
 
 ## Related projects
 
-- [intodo](https://github.com/irvan-putra/intodo) embeds this same bot
-  runtime inside itdapk, alongside the todo lists it serves. jin is the
+- [tindak](https://github.com/irvan-putra/tindak) embeds this same bot
+  runtime, alongside the todo lists it serves. jin is the
   standalone runner.
 
 ## Build

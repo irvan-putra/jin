@@ -1,5 +1,11 @@
 # webxdc storage bridge bot + storage adapter #1 (libSQL/Turso)
 
+> Naming note (2026-11-23): the 12 Nov 2026 product names below are
+> retired - itdweb, itdapk and itdxdc are one app family now called tindak
+> (github.com/irvan-putra/tindak), and intodo-bot-validation was this
+> repo's scratch predecessor (now jin). Dated verification records keep
+> their original names.
+
 Product names (user-chosen, 12 Nov 2026): itdweb = the Instinct hosted page,
 itdapk = the Android APK with widget, itdxdc = the webxdc DeltaChat mini-app.
 This bot bridges itdxdc (and any webxdc app) to durable storage.

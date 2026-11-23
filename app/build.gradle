@@ -33,7 +33,7 @@ chaquopy {
 
 
 dependencies {
-    // Left-edge diagnostics menu (same pattern as intodo).
+    // Left-edge diagnostics menu (same pattern as tindak).
     implementation 'androidx.drawerlayout:drawerlayout:1.2.0'
 
     // Local-only JVM tests (Robolectric); never shipped in the APK.

@@ -37,9 +37,9 @@ public class BotService extends Service {
         } else {
             getSharedPreferences("bot", MODE_PRIVATE).edit().putString("last_mode", mode).apply();
         }
-        String label = mode.equals("live") ? "itdxdc delivery bot running"
+        String label = mode.equals("live") ? "tindak delivery bot running"
                 : mode.equals("provision") ? "creating bot account"
-                : mode.equals("export") ? "exporting bot for itdapk"
+                : mode.equals("export") ? "exporting bot for tindak"
                 : mode.equals("syncfixture") ? "offline transport fixture running"
                 : "offline validation running";
         Notification.Builder nb = Build.VERSION.SDK_INT >= 26

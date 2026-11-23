@@ -1,26 +1,37 @@
-# Bot migration component: scratch test app -> itdapk (0.4.5)
+# Bot migration component: jin -> tindak
+
+> Status (2026-11-23): the original import target (itdapk 0.4.5) was
+> retired in the tindak fresh start, and the current tindak has no import
+> screen, so this flow is dormant until one lands. Names were updated from
+> itdapk/intodo/dcbot to tindak/jin.
+> Compatibility break, recorded: the Fernet domain strings were renamed
+> from `|dcbot-migration-state-v1` / `|dcbot-migration-wrap-v1` to
+> `|jin-migration-state-v1` / `|jin-migration-wrap-v1`, and the default
+> bundle name from `dcbot-migration.dcmig` to `jin-migration.dcmig`.
+> Bundles exported before 2026-11-23 are not decryptable by builds using
+> the new domains. No live peer broke: tindak has no import side yet.
 
 Moves the EXISTING bot (its Delta Chat identity, served chats,
-per-chat list ids and op stores) into the merged itdapk app. No account
+per-chat list ids and op stores) into the merged tindak app. No account
 reset, no new identity, no reinstall of the Delta Chat side, nothing through
 any chat or server: one encrypted file, user-mediated, on one phone.
 
 ## User-facing flow
 
-Scratch app (r10):
-1. Button "5. Export bot for itdapk" -> confirm dialog (says live bot pauses).
+Export side (the scratch app r10 then; jin now):
+1. Button "5. Export bot for tindak" -> confirm dialog (says live bot pauses).
 2. Activity stops BotService, waits for the RUNNING lock to clear, runs
    service mode `export`.
 3. Python (`migration.export_migration`) generates a one-time transfer code,
    calls core `export_backup(dir, code)` (SQLCipher-encrypted database),
-   wraps backup + bot state into `dcbot-migration.dcmig`, writes
+   wraps backup + bot state into `jin-migration.dcmig`, writes
    `EXPORT_RESULT` (app-private json: bundle path + code).
 4. UI shows the code (selectable, "Copy code" marks the clipboard entry
    IS_SENSITIVE on API 33+), then SAF ACTION_CREATE_DOCUMENT for the bundle.
 5. Live bot stays PAUSED. Button 3 = abort and resume. Uninstall only after
-   itdapk shows the bot running with the same address.
+   tindak shows the bot running with the same address.
 
-itdapk (0.4.5):
+The import side (verified in itdapk 0.4.5, the app now called tindak):
 1. BotActivity first run: "Import bot backup" next to "Create new bot
    account" (import only when no configured account exists - enforced in
    python, refused loudly otherwise).
@@ -31,7 +42,7 @@ itdapk (0.4.5):
 3. Success -> callback with the bot address -> UI confirms it matches the
    old app -> only then the first BotService start. Failure -> error shown,
    bundle untouched, nothing committed, retry allowed.
-4. After the bot is live in itdapk, the user uninstalls the scratch app
+4. After the bot is live in tindak, the user uninstalls the scratch app
    (its data copy dies with it). Migration complete.
 
 ## Bundle format (dcmig/1)
@@ -109,7 +120,7 @@ same-device path unverified, heavier code).
 
 1. scratch r10 in-place update (same cert as r9) -> export -> code shown,
    bundle saved via SAF.
-2. itdapk 0.4.5 install-over (data survives per 0.4.4 proof) -> import ->
+2. The 0.4.5 build (the app now called tindak) install-over (data survives per 0.4.4 proof) -> import ->
    enter code -> success shows the bot's own address.
 3. Bot UI: the bot's own address shown, served chats present.
 4. Start service, send a DM to the bot, add it back to the shared group if

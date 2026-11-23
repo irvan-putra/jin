@@ -88,7 +88,7 @@ public class MainActivity extends Activity {
             versionText.setText("jin " + pi.versionName + " (" + vc + ")");
         } catch (Exception ignored) {}
 
-        // Menu without visible chrome, same as intodo: left-edge swipe (DrawerLayout)
+        // Menu without visible chrome, same as tindak: left-edge swipe (DrawerLayout)
         // plus long-press anywhere / a TalkBack action as the accessible fallback.
         installMenuAccess(findViewById(R.id.contentRoot));
         // The ScrollView consumes the whole touch stream below the header
@@ -390,7 +390,7 @@ public class MainActivity extends Activity {
         startForegroundService(i);
     }
 
-    // ---- export flow (jin -> itdapk migration) --------------------------
+    // ---- export flow (jin -> tindak migration) --------------------------
     private static final int REQ_SAVE_BUNDLE = 42;
     private String pendingBundlePath = null;
 
@@ -404,8 +404,8 @@ public class MainActivity extends Activity {
             return;
         }
         new android.app.AlertDialog.Builder(this)
-            .setTitle("Export bot for itdapk")
-            .setMessage("This pauses the live bot and writes ONE protected bundle holding the bot's Delta Chat account AND its owner/chat state, both encrypted with a one-time transfer code shown next.\n\nKeep the bundle file and the code private: together they ARE the bot. You pick where the file goes and copy the code yourself; nothing is sent anywhere.\n\nThe live bot stays paused until the import finishes in itdapk (or start the bot again here to resume it).")
+            .setTitle("Export bot for tindak")
+            .setMessage("This pauses the live bot and writes ONE protected bundle holding the bot's Delta Chat account AND its owner/chat state, both encrypted with a one-time transfer code shown next.\n\nKeep the bundle file and the code private: together they ARE the bot. You pick where the file goes and copy the code yourself; nothing is sent anywhere.\n\nThe live bot stays paused until the import finishes in tindak (or start the bot again here to resume it).")
             .setPositiveButton("Export", (d, w) -> runExportAfterStop())
             .setNegativeButton("Cancel", null)
             .show();
@@ -476,7 +476,7 @@ public class MainActivity extends Activity {
         tv.setPadding(pad, pad, pad, pad);
         new android.app.AlertDialog.Builder(this)
             .setTitle("1/2: one-time transfer code")
-            .setMessage("Enter this code in itdapk's import screen. It protects the bot's whole identity - never send it through a chat.")
+            .setMessage("Enter this code in tindak's import screen. It protects the bot's whole identity - never send it through a chat.")
             .setView(tv)
             .setNeutralButton("Copy code", (d, w) -> { copyCode(code); showTransferCode(code); })
             .setPositiveButton("Next", (d, w) -> showSaveStep(code))
@@ -487,7 +487,7 @@ public class MainActivity extends Activity {
     private void showSaveStep(final String code) {
         new android.app.AlertDialog.Builder(this)
             .setTitle("2/2: save the bundle file")
-            .setMessage("Choose where the .dcmig bundle is written (Downloads is fine). You will pick this file in itdapk's import screen.")
+            .setMessage("Choose where the .dcmig bundle is written (Downloads is fine). You will pick this file in tindak's import screen.")
             .setPositiveButton("Choose location", (d, w) -> {
                 Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
                 i.addCategory(android.content.Intent.CATEGORY_OPENABLE);
@@ -501,7 +501,7 @@ public class MainActivity extends Activity {
 
     private void copyCode(String code) {
         ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-        ClipData clip = ClipData.newPlainText("itdapk migration code", code);
+        ClipData clip = ClipData.newPlainText("tindak migration code", code);
         if (Build.VERSION.SDK_INT >= 33) {
             android.os.PersistableBundle b = new android.os.PersistableBundle();
             b.putBoolean("android.content.extra.IS_SENSITIVE", true);
@@ -711,7 +711,7 @@ public class MainActivity extends Activity {
             new File(getFilesDir(), "EXPORT_RESULT").delete();
             new android.app.AlertDialog.Builder(this)
                 .setTitle("Bundle saved")
-                .setMessage("In itdapk: choose 'Import bot backup', pick this file, enter the transfer code.\n\nThe live bot here stays PAUSED. Only uninstall this app after itdapk shows the bot running with the same address. Starting the bot again here resumes it if you abort the migration.")
+                .setMessage("In tindak: choose 'Import bot backup', pick this file, enter the transfer code.\n\nThe live bot here stays PAUSED. Only uninstall this app after tindak shows the bot running with the same address. Starting the bot again here resumes it if you abort the migration.")
                 .setPositiveButton("OK", null)
                 .show();
         } catch (Exception e) {

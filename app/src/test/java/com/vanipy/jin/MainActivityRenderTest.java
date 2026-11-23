@@ -161,7 +161,7 @@ public class MainActivityRenderTest {
         assertFalse(drawer.isDrawerVisible(GravityCompat.START));
         assertEquals("View logs", text(a, R.id.menuLogs));
         assertEquals("Run offline validation probe", text(a, R.id.menuProbe));
-        assertEquals("Export bot for itdapk", text(a, R.id.menuExport));
+        assertEquals("Export bot for tindak", text(a, R.id.menuExport));
         // Long-press wiring: DrawerLayout accepted the open request (the
         // animated path's visibility flips need real layout frames a JVM
         // cannot run; the open-request flags are the synchronous signal).

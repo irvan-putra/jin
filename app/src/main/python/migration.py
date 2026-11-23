@@ -1,5 +1,5 @@
 """Migration bundle: secure phone-local handoff of the bot between Android
-packages (scratch test app -> itdapk). Reversible by design: export never
+packages (jin -> tindak). Reversible by design: export never
 deletes anything; import stages + verifies before committing.
 
 Bundle = one .dcmig zip with exactly three members:
@@ -48,8 +48,8 @@ import time
 import zipfile
 
 FORMAT = "dcmig/1"
-STATE_DOMAIN = b"|dcbot-migration-state-v1"
-WRAP_DOMAIN = b"|dcbot-migration-wrap-v1"
+STATE_DOMAIN = b"|jin-migration-state-v1"
+WRAP_DOMAIN = b"|jin-migration-wrap-v1"
 RESULT_FILE = "EXPORT_RESULT"     # json {bundle, code} or {error}; UI reads+deletes
 STAGING_DIR = ".import-staging"
 BACKUP_TMP = ".import-backup.tmp"
@@ -258,7 +258,7 @@ def export_migration(native_lib_dir, files_dir, out_dir):
         backup_path = os.path.join(
             out_dir, max(produced,
                          key=lambda n: os.path.getmtime(os.path.join(out_dir, n))))
-        bundle_path = os.path.join(out_dir, "dcbot-migration.dcmig")
+        bundle_path = os.path.join(out_dir, "jin-migration.dcmig")
         build_bundle(backup_path, files_dir, bundle_path, code)
         # The raw backup tar (plaintext blobs) must not linger on disk.
         os.unlink(backup_path)
@@ -277,7 +277,7 @@ def export_migration(native_lib_dir, files_dir, out_dir):
         raise
 
 
-# -- import (itdapk side) ------------------------------------------------------
+# -- import (tindak side) ------------------------------------------------------
 
 def import_migration(native_lib_dir, files_dir, bundle_path, code,
                      _rpc_factory=None):
