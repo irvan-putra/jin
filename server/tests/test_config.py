@@ -52,6 +52,22 @@ class ConfigTest(unittest.TestCase):
             JIN_S3_ACCESS_KEY="a", JIN_S3_SECRET_KEY="s"))
         self.assertIsNotNone(c.s3)
 
+    def test_signing_region_override_wins_over_empty_binding_region(self):
+        # the NEO typed bucket binding injects JIN_S3_REGION as ""
+        c = start.Config(env(
+            JIN_S3_ENDPOINT="https://nos.wjv-1.neo.id",
+            JIN_S3_REGION="",
+            JIN_S3_SIGNING_REGION="WJV-1",
+            JIN_S3_BUCKET="b", JIN_S3_ACCESS_KEY="a", JIN_S3_SECRET_KEY="s"))
+        self.assertEqual(c.s3["REGION"], "WJV-1")
+
+    def test_region_falls_back_when_no_override(self):
+        c = start.Config(env(
+            JIN_S3_ENDPOINT="https://nos.jkt-1.neo.id",
+            JIN_S3_REGION="jkt-1", JIN_S3_BUCKET="b",
+            JIN_S3_ACCESS_KEY="a", JIN_S3_SECRET_KEY="s"))
+        self.assertEqual(c.s3["REGION"], "jkt-1")
+
     def test_http_bucket_endpoint_refused(self):
         from bucket import Bucket, BucketError
         with self.assertRaises(BucketError):

@@ -44,7 +44,8 @@ started here; that integration is parked.
 | --- | --- | --- |
 | `JIN_TRANSFER_CODE` | yes | 32 random bytes base64url (44 chars). Encrypts every state bundle; also the core backup's SQLCipher passphrase. Generate once, keep safe: `python3 -c "import secrets,base64;print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"` |
 | `JIN_DB_DSN` | yes in production | `postgres://user:pass@host:5432/dbname` from the NEO App database binding. Exact host/port/TLS are only visible in the portal at bind time; do not guess. `sslmode` as the binding dictates. |
-| `JIN_S3_ENDPOINT` / `JIN_S3_REGION` / `JIN_S3_BUCKET` / `JIN_S3_ACCESS_KEY` / `JIN_S3_SECRET_KEY` | for blobs | NEO Object Storage (S3-compatible, e.g. `https://nos.jkt-1.neo.id`). All-or-none; without them the bucket bridge stays off and publishing is operator-local only. |
+| `JIN_S3_ENDPOINT` / `JIN_S3_REGION` / `JIN_S3_BUCKET` / `JIN_S3_ACCESS_KEY` / `JIN_S3_SECRET_KEY` | for blobs | NEO Object Storage (S3-compatible, e.g. `https://nos.jkt-1.neo.id`). All-or-none; without them the bucket bridge stays off and publishing is operator-local only. The region feeds only the SigV4 signing scope, never endpoint routing. |
+| `JIN_S3_SIGNING_REGION` | when the binding injects an empty region | Signing-region override that wins over `JIN_S3_REGION`. Needed because the NEO typed bucket binding injects `JIN_S3_REGION` as an empty string and binding vars take precedence over per-service vars; set it to the verified signing region (e.g. `WJV-1`). |
 | `JIN_S3_PREFIX` | no | Object key prefix, default `jin`. |
 | `JIN_CHATMAIL_RELAY` | no | Chatmail relay for a fresh account, default `nine.testrun.org`. Only used on first boot with an empty database. |
 | `JIN_WORK_DIR` | no | Scratch working dir inside the container, default `/work`. Ephemeral by design; the database is the durable state. |

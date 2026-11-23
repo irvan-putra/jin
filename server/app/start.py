@@ -79,6 +79,12 @@ class Config:
 
         s3 = {k: env.get("JIN_S3_" + k) for k in
               ("ENDPOINT", "REGION", "BUCKET", "ACCESS_KEY", "SECRET_KEY")}
+        # The NEO typed bucket binding injects JIN_S3_REGION as an empty
+        # string and binding vars cannot be overridden per-service. The
+        # explicit signing-region override therefore wins when set; the
+        # region is only used for the SigV4 credential scope, never for
+        # endpoint routing.
+        s3["REGION"] = env.get("JIN_S3_SIGNING_REGION") or s3["REGION"]
         have = {k: v for k, v in s3.items() if v}
         if have and len(have) != 5:
             raise ConfigError("bucket config is all-or-none: set all of "
