@@ -169,7 +169,8 @@ recipe, not approval to create paid resources.
    billable resources. Use the official portal to supply current credentials
    securely; never commit keys or connection strings. The November 2026 rate
    above is a historical estimate, not a current quote.
-2. Clone this repository and check out the intended tested commit. Run
+2. Clone this repository and check out the intended tested commit. Install the pinned dependencies with
+   `python3 -m pip install -r server/requirements.txt`, then run
    `python3 -m unittest discover -s server/tests -v`. Review `server/Dockerfile`
    and the environment contract in `server/README.md`.
 3. Follow Procedure steps 1-8 with a **new dedicated project**, database,
