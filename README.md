@@ -101,3 +101,7 @@ machine and click wiring, and native-graphics renders of the three bot
 states plus the diagnostics menu. The python wrapper suite
 (`app/src/main/python/test_bot_runtime.py`) runs the trust/isolation model
 against the shipped modules.
+
+---
+
+Built with AI assistance (Instinct and others). Not everything has been reviewed by Irvan.
